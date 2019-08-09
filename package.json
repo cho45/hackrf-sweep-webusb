@@ -1,0 +1,14 @@
+{
+  "name": "hackrf",
+  "version": "1.0.0",
+  "main": "script.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "cho45 <cho45@lowreal.net> (http://www.lowreal.net/)",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "comlink": "^4.0.2"
+  }
+}
