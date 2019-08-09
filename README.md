@@ -14,3 +14,9 @@ There are no requirements except a browser supporting WebUSB (available by defau
 4. Set range for analysis.
 5. Click [START].
 6. Adjast gains.
+
+# Implementation
+
+1. Communication with HackRF device with <strong>WebUSB</strong>.
+2. Run FFT with <strong>WebAssembly</strong> which is written in Rust (using <a href="https://github.com/awelkie/RustFFT">RustFFT</a>)
+3. Show results with <strong>WebGL</strong> waterfall implementation.
