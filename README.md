@@ -1,6 +1,6 @@
 # HackRF Sweep WebUSB
 
-This is spectrum analyzer implementation in JavaScript with WebUSB for <a href="https://greatscottgadgets.com/hackrf/">HackRF</a>.
+This is a spectrum analyzer implementation in JavaScript with WebUSB for <a href="https://greatscottgadgets.com/hackrf/">HackRF</a>.
 
 <img src="./doc/dfe049fbba1adc9c9e0e21e2449f72cd.gif">
 
