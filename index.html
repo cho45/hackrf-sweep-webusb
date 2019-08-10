@@ -44,6 +44,10 @@
 			.form {
 			}
 
+			.md-checkbox {
+				display: flex;
+			}
+
 			.axis {
 				position: absolute;
 				top: 0;
@@ -64,10 +68,10 @@
 	<body>
 		<div id="app">
 			<div class="actions">
-				<md-button class="md-raised md-primary" v-on:click="connect" v-show="!connected">connect</md-button>
-				<div v-show="connected">
-					<md-button class="md-raised md-primary" v-on:click="start" v-show="!running">start</md-button>
-					<md-button class="md-raised" v-on:click="stop" v-show="running">stop</md-button>
+				<div v-show="connected" style="margin-left: -8px">
+					<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected">connect</md-button>
+					<md-button class="md-raised md-primary" v-on:click="start" v-if="!running">start</md-button>
+					<md-button class="md-raised" v-on:click="stop" v-if="running">stop</md-button>
 				</div>
 				<div class="form">
 					<md-field>
@@ -99,6 +103,7 @@
 							<md-option value="8192">8192</md-option>
 						</md-select>
 					</md-field>
+					<md-divider></md-divider>
 					<md-field>
 						<label>LNA Gain (IF)</label>
 						<md-input v-model="options.lnaGain" type="number" step="8" max="40" min="0" required></md-input>
