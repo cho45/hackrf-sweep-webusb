@@ -111,8 +111,13 @@ new Vue({
 			const FFT_SIZE = +this.range.fftSize;
 
 			const lowFreq = +this.range.start;
-			const highFreq = +this.range.stop;
-			const bandwidth = highFreq - lowFreq;
+			const highFreq0 = +this.range.stop;
+			const bandwidth0 = highFreq0 - lowFreq;
+			const steps = Math.ceil((bandwidth0*1e6) / SAMPLE_RATE);
+			const bandwidth = (steps * SAMPLE_RATE) / 1e6;
+			const highFreq = lowFreq + bandwidth;
+			this.range.stop = highFreq;
+
 			const freqBinCount = (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
 
 			console.log({lowFreq, highFreq, bandwidth, freqBinCount});

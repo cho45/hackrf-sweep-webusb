@@ -105,6 +105,9 @@ class Worker {
 			window[i] = windowFunction(i / FFT_SIZE);
 		}
 
+		const SAMPLES_PER_BLOCK = HackRF.SAMPLES_PER_BLOCK;
+		const BYTES_PER_BLOCK = HackRF.BYTES_PER_BLOCK;
+
 		const fft = new lib.wasm_bindgen.FFT(FFT_SIZE, window);
 		const line   = new Float32Array(freqBinCount);
 		const output = new Float32Array(FFT_SIZE);
@@ -114,7 +117,7 @@ class Worker {
 				// console.log(o % HackRF.BYTES_PER_BLOCK, n, data[o+0], data[o+1]);
 				if (!(data[o+0] === 0x7F && data[o+1] === 0x7F)) {
 					console.log('invalid header', n, data[o+0], data[o+1]);
-					o += HackRF.BYTES_PER_BLOCK;
+					o += BYTES_PER_BLOCK;
 					continue;
 				}
 
@@ -138,12 +141,12 @@ class Worker {
 
 				if (freqM < lowFreq) {
 					console.log(freqM, 'ignored');
-					o += HackRF.BYTES_PER_BLOCK;
+					o += BYTES_PER_BLOCK;
 					continue;
 				} else
 				if (freqM > highFreq) {
 					console.log(freqM, 'ignored');
-					o += HackRF.BYTES_PER_BLOCK;
+					o += BYTES_PER_BLOCK;
 					continue
 				} else
 				if (freqM === lowFreq) {
@@ -151,7 +154,7 @@ class Worker {
 					line.fill(0);
 				}
 
-				o += HackRF.BYTES_PER_BLOCK - (FFT_SIZE * 2);
+				o += BYTES_PER_BLOCK - (FFT_SIZE * 2);
 				const target = data.subarray(o, o + FFT_SIZE * 2);
 				fft.fft(target, output);
 				o += FFT_SIZE * 2;
@@ -170,14 +173,14 @@ class Worker {
 
 		console.log('initSweep', [
 			[lowFreq, highFreq],
-			HackRF.SAMPLES_PER_BLOCK * 2 /* I + Q */,
+			SAMPLES_PER_BLOCK * 2 /* I + Q */,
 			SAMPLE_RATE,
 			SAMPLE_RATE / 8 * 3,
 			HackRF.SWEEP_STYLE_INTERLEAVED
 		]);
 		await hackrf.initSweep(
 			[lowFreq, highFreq],
-			HackRF.SAMPLES_PER_BLOCK * 2 /* I + Q */,
+			SAMPLES_PER_BLOCK * 2 /* I + Q */,
 			SAMPLE_RATE,
 			SAMPLE_RATE / 8 * 3,
 			HackRF.SWEEP_STYLE_INTERLEAVED
