@@ -173,6 +173,7 @@ class WaterfallGL {
 
 		// just for initializing
 		this.canvas.width  = Math.pow(2, Math.ceil(Math.log2(this.bandSize)));
+		console.log({glInit: this.canvas.width});
 		this.canvas.height = this.historySize;
 		console.log(this.canvas.width, this.bandSize);
 

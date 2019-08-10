@@ -115,7 +115,12 @@ new Vue({
 			const bandwidth = highFreq - lowFreq;
 			const freqBinCount = (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
 
-			const waterfall = new WaterfallGL(canvasWf, freqBinCount, 256);
+			console.log({lowFreq, highFreq, bandwidth, freqBinCount});
+			const nx = Math.pow(2, Math.ceil(Math.log2(freqBinCount)));
+			const maxTextureSize = 16384;
+			const waterfall = (nx <= maxTextureSize) ?
+				new WaterfallGL(canvasWf, freqBinCount, 256):
+				new Waterfall(canvasWf, freqBinCount, 256);
 
 			canvasFft.height = 200;
 			canvasFft.width  = freqBinCount;
