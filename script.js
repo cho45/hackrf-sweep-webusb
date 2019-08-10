@@ -108,7 +108,6 @@ new Vue({
 			const { canvasFft, canvasWf } = this;
 
 			const SAMPLE_RATE = 20e6;
-			const FFT_SIZE = +this.range.fftSize;
 
 			const lowFreq = +this.range.start;
 			const highFreq0 = +this.range.stop;
@@ -118,7 +117,16 @@ new Vue({
 			const highFreq = lowFreq + bandwidth;
 			this.range.stop = highFreq;
 
-			const freqBinCount = (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
+			// const FFT_SIZE = +this.range.fftSize;
+			// const freqBinCount = (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
+			//
+			const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
+			const fftSize0 = Math.pow(2, Math.ceil(Math.log2((freqBinCount0 * SAMPLE_RATE ) / (bandwidth*1e6))));
+			const fftSize1 = fftSize0 < +this.range.fftSize ? fftSize0 : +this.range.fftSize;
+			const FFT_SIZE = fftSize1 > 8 ? fftSize1 : 8;
+			const freqBinCount =  (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
+			this.range.fftSize = FFT_SIZE;
+
 
 			console.log({lowFreq, highFreq, bandwidth, freqBinCount});
 			const nx = Math.pow(2, Math.ceil(Math.log2(freqBinCount)));

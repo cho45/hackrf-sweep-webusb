@@ -161,10 +161,10 @@ class Worker {
 
 				//*
 				let pos = Math.floor((freqM - lowFreq) / bandwidth * freqBinCount);
-				const low = output.subarray(Math.floor(FFT_SIZE/8*1), Math.ceil(FFT_SIZE/8*3));
+				const low = output.subarray(Math.floor(FFT_SIZE/8*1), Math.ceil(FFT_SIZE/8*3) + 1);
 				if (pos < line.length) line.set(low.subarray(0, (line.length - pos)), pos);
 				const pos2 = pos + FFT_SIZE/2;
-				const high = output.subarray(Math.floor(FFT_SIZE/8*5), Math.ceil(FFT_SIZE/8*7));
+				const high = output.subarray(Math.floor(FFT_SIZE/8*5), Math.ceil(FFT_SIZE/8*7) + 1);
 				if (pos2 < line.length) line.set(high.subarray(0, (line.length - pos2)), pos2);
 				// console.log({freqM, pos, pos2}, output.length, line.length);
 				//*/
