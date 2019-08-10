@@ -133,20 +133,22 @@ new Vue({
 			const ctxFft = canvasFft.getContext('2d');
 
 			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data) => {
-				waterfall.renderLine(data);
+				requestAnimationFrame( () => {
+					waterfall.renderLine(data);
 
-				ctxFft.fillStyle = "rgba(0, 0, 0, 0.1)";
-				ctxFft.fillRect(0, 0, canvasFft.width, canvasFft.height);
-				ctxFft.save();
-				ctxFft.beginPath();
-				ctxFft.moveTo(0, canvasFft.height);
-				for (let i = 0; i < freqBinCount; i++) {
-					const n = (data[i] + 45) / 42;
-					ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n );
-				}
-				ctxFft.strokeStyle = "#fff";
-				ctxFft.stroke();
-				ctxFft.restore();
+					ctxFft.fillStyle = "rgba(0, 0, 0, 0.1)";
+					ctxFft.fillRect(0, 0, canvasFft.width, canvasFft.height);
+					ctxFft.save();
+					ctxFft.beginPath();
+					ctxFft.moveTo(0, canvasFft.height);
+					for (let i = 0; i < freqBinCount; i++) {
+						const n = (data[i] + 45) / 42;
+						ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n );
+					}
+					ctxFft.strokeStyle = "#fff";
+					ctxFft.stroke();
+					ctxFft.restore();
+				});
 			}));
 
 			this.running = true;
