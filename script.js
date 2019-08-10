@@ -125,7 +125,12 @@ new Vue({
 			const fftSize1 = fftSize0 < +this.range.fftSize ? fftSize0 : +this.range.fftSize;
 			const FFT_SIZE = fftSize1 > 8 ? fftSize1 : 8;
 			const freqBinCount =  (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
-			this.range.fftSize = FFT_SIZE;
+
+			if (this.range.fftSize != FFT_SIZE) {
+				this.snackbar.show = true;
+				this.snackbar.message = "FFT Size is limited to rendering width";
+				this.range.fftSize = FFT_SIZE;
+			}
 
 
 			console.log({lowFreq, highFreq, bandwidth, freqBinCount});

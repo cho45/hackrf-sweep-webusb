@@ -72,17 +72,32 @@
 				<div class="form">
 					<md-field>
 						<label>Start Frequency</label>
-						<md-input v-model="range.start" type="number" step="1" required :disabled="running"></md-input>
+						<md-input v-model="range.start" type="number" step="1" min="1" max="6000" required :disabled="running"></md-input>
 						<span class="md-suffix">MHz</span>
 					</md-field>
 					<md-field>
 						<label>End Frequency</label>
-						<md-input v-model="range.stop" type="number" step="1" required :disabled="running"></md-input>
+						<md-input v-model="range.stop" type="number" step="1" min="1" max="6000" required :disabled="running"></md-input>
 						<span class="md-suffix">MHz</span>
 					</md-field>
 					<md-field>
 						<label>FFT Size</label>
+						<!--
 						<md-input v-model="range.fftSize" type="number" step="1" required :disabled="running"></md-input>
+						-->
+						<md-select v-model="range.fftSize">
+							<md-option value="8">8</md-option>
+							<md-option value="16">16</md-option>
+							<md-option value="32">32</md-option>
+							<md-option value="64">64</md-option>
+							<md-option value="128">128</md-option>
+							<md-option value="256">256</md-option>
+							<md-option value="512">512</md-option>
+							<md-option value="1024">1024</md-option>
+							<md-option value="2048">2048</md-option>
+							<md-option value="4096">4096</md-option>
+							<md-option value="8192">8192</md-option>
+						</md-select>
 					</md-field>
 					<md-field>
 						<label>LNA Gain (IF)</label>
