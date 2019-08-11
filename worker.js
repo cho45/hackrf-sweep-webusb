@@ -108,10 +108,11 @@ class Worker {
 		const SAMPLES_PER_BLOCK = HackRF.SAMPLES_PER_BLOCK;
 		const BYTES_PER_BLOCK = HackRF.BYTES_PER_BLOCK;
 
-		let prevTime = performance.now();
+		let startTime = performance.now();
+		let prevTime = startTime;
 		let readBytes = 0;
-		let sweepCount = 0;
 		let bytesPerSec = 0;
+		let sweepCount = 0;
 		let sweepPerSec = 0;
 
 		const fft = new lib.wasm_bindgen.FFT(FFT_SIZE, window);
@@ -123,11 +124,8 @@ class Worker {
 			const duration = now - prevTime;
 			if (duration > 1000) {
 				bytesPerSec = readBytes / (duration / 1000);
-				sweepPerSec = sweepCount / (duration / 1000);
-
 				prevTime = now;
 				readBytes = 0;
-				sweepCount = 0;
 			}
 
 			let o = 0;
@@ -169,7 +167,13 @@ class Worker {
 				} else
 				if (freqM === lowFreq) {
 					sweepCount++;
-					callback(line, { sweepPerSec, bytesPerSec });
+
+					const duration = now - startTime;
+					sweepPerSec = sweepCount / (duration / 1000);
+					const MAX_FPS = 60;
+					if (sweepCount % Math.round(sweepPerSec / MAX_FPS) === 0) {
+						callback(line, { sweepPerSec, bytesPerSec, sweepCount });
+					}
 					line.fill(0);
 				}
 
