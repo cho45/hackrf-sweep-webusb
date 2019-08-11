@@ -20,7 +20,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 
 function convertDecibelToRGB (dB) {
 	var r = 0, g = 0, b = 0;
-	var p = (dB + 42) / 42;
+	var p = (dB + 48) / 48;
 
 	switch (true) {
 	case p > 5.0/6.0:

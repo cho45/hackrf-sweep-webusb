@@ -159,6 +159,12 @@ new Vue({
 			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data, metrics) => {
 				this.metrics = metrics;
 				requestAnimationFrame( () => {
+					/*
+					const max = Math.max(...data);
+					const min = Math.min(...data);
+					console.log({max,min});
+					*/
+
 					waterfall.renderLine(data);
 
 					ctxFft.fillStyle = "rgba(0, 0, 0, 0.1)";

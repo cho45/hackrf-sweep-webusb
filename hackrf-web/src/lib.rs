@@ -96,7 +96,7 @@ impl FFT {
 
         for i in 0..self.n {
             // result[i] = log10(result[i]) * 20.0;
-            result[i] = result[i].log10() * 20.0;
+            result[i] = result[i].log10() * 10.0;
         }
     }
 }
