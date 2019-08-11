@@ -68,10 +68,15 @@
 	<body>
 		<div id="app">
 			<div class="actions">
-				<div v-show="connected" style="margin-left: -8px">
-					<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected">connect</md-button>
-					<md-button class="md-raised md-primary" v-on:click="start" v-if="!running">start</md-button>
-					<md-button class="md-raised" v-on:click="stop" v-if="running">stop</md-button>
+				<div style="margin-left: -8px">
+					<template v-if="!connected">
+						<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected">connect</md-button>
+					</template>
+					<template v-if="connected">
+						<md-button class="md-raised md-primary" v-on:click="start" v-if="!running">start</md-button>
+						<md-button class="md-raised" v-on:click="stop" v-if="running">stop</md-button>
+						<md-button class="md-raised" v-on:click="disconnect" v-if="connected">disconnect</md-button>
+					</template>
 					<div class="md-caption" style="margin: 0 8px">{{metrics.sweepPerSec.toFixed(1)}} sweep/sec {{(metrics.bytesPerSec/1e6).toFixed(1)}} MB/sec</div>
 				</div>
 				<div class="form">

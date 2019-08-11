@@ -105,6 +105,13 @@ new Vue({
 			await this.backend.setVgaGain(+this.options.vgaGain);
 		},
 
+		disconnect: async function () {
+			await this.backend.close();
+			console.log('disconnected');
+			this.connected = false;
+			this.running = false;
+		},
+
 		start: async function () {
 			if (this.running) return;
 			this.running = false;

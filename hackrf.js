@@ -494,7 +494,8 @@ class HackRF {
 	}
 
 	async exit() {
-		this.device.close();
+		console.log('exit');
+		await this.device.close();
 	}
 }
 
