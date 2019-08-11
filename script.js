@@ -57,6 +57,10 @@ new Vue({
 			partIdNumber: "",
 			firmwareVersion: "",
 		},
+		metrics: {
+			sweepPerSec: 0,
+			bytesPerSec: 0,
+		},
 
 		currentHover: "",
 		showInfo: false
@@ -145,7 +149,8 @@ new Vue({
 
 			const ctxFft = canvasFft.getContext('2d');
 
-			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data) => {
+			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data, metrics) => {
+				this.metrics = metrics;
 				requestAnimationFrame( () => {
 					waterfall.renderLine(data);
 

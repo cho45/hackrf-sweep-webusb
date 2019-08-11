@@ -108,10 +108,28 @@ class Worker {
 		const SAMPLES_PER_BLOCK = HackRF.SAMPLES_PER_BLOCK;
 		const BYTES_PER_BLOCK = HackRF.BYTES_PER_BLOCK;
 
+		let prevTime = performance.now();
+		let readBytes = 0;
+		let sweepCount = 0;
+		let bytesPerSec = 0;
+		let sweepPerSec = 0;
+
 		const fft = new lib.wasm_bindgen.FFT(FFT_SIZE, window);
 		const line   = new Float32Array(freqBinCount);
 		const output = new Float32Array(FFT_SIZE);
 		await hackrf.startRx((data) => {
+			readBytes += data.length;
+			const now = performance.now();
+			const duration = now - prevTime;
+			if (duration > 1000) {
+				bytesPerSec = readBytes / (duration / 1000);
+				sweepPerSec = sweepCount / (duration / 1000);
+
+				prevTime = now;
+				readBytes = 0;
+				sweepCount = 0;
+			}
+
 			let o = 0;
 			for (let n = 0, len = 16; n < len; n++) {
 				// console.log(o % HackRF.BYTES_PER_BLOCK, n, data[o+0], data[o+1]);
@@ -150,7 +168,8 @@ class Worker {
 					continue
 				} else
 				if (freqM === lowFreq) {
-					callback(line);
+					sweepCount++;
+					callback(line, { sweepPerSec, bytesPerSec });
 					line.fill(0);
 				}
 
