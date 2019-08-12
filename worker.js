@@ -171,7 +171,7 @@ class Worker {
 					const duration = now - startTime;
 					sweepPerSec = sweepCount / (duration / 1000);
 					const MAX_FPS = 60;
-					if (sweepCount % Math.round(sweepPerSec / MAX_FPS) === 0) {
+					if (sweepPerSec < MAX_FPS || sweepCount % Math.round(sweepPerSec / MAX_FPS) === 0) {
 						callback(line, { sweepPerSec, bytesPerSec, sweepCount });
 					}
 					line.fill(0);
