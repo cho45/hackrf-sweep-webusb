@@ -43,8 +43,10 @@ pub fn set_panic_hook() {
 #[wasm_bindgen]
 pub struct FFT {
     n: usize,
+    smoothing_time_constant: f32,
     fft: std::sync::Arc<dyn rustfft::FFT<f32>>,
     window: Box<[f32]>,
+    prev: Box<[f32]>,
 }
 
 
@@ -56,14 +58,22 @@ impl FFT {
         let fft = FFTplanner::new(false).plan_fft(n);
         let mut window = vec![0.0; n].into_boxed_slice();
         window.copy_from_slice(window_);
+        let prev = vec![0.0; n].into_boxed_slice();
+        let smoothing_time_constant = 0.0;
         FFT {
             n,
+            smoothing_time_constant,
             fft,
-            window
+            window,
+            prev
         }
     }
 
-    pub fn fft(&self, input_: &mut [i8], result: &mut [f32]) {
+    pub fn set_smoothing_time_constant(&mut self, val: f32) {
+        self.smoothing_time_constant = val;
+    }
+
+    pub fn fft(&mut self, input_: &mut [i8], result: &mut [f32]) {
         let input_i8:  &mut [Complex<i8>] = unsafe { slice::from_raw_parts_mut(input_  as *mut [i8] as *mut Complex<i8>, self.n )};
 
         let mut output = Vec::<Complex<f32>>::with_capacity(self.n);
@@ -92,6 +102,16 @@ impl FFT {
         }
         for i in half_n..self.n {
             result[i-half_n] = output[i].norm() / (self.n as f32);
+        }
+
+        if self.smoothing_time_constant > 0.0 {
+            for i in 0..self.n {
+                let x_p = self.prev[i];
+                let x_k = result[i];
+                result[i] = self.smoothing_time_constant * x_p + (1.0 - self.smoothing_time_constant) * x_k;
+            }
+
+            self.prev.copy_from_slice(result);
         }
 
         for i in 0..self.n {

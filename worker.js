@@ -116,6 +116,7 @@ class Worker {
 		let sweepPerSec = 0;
 
 		const fft = new lib.wasm_bindgen.FFT(FFT_SIZE, window);
+		fft.set_smoothing_time_constant(0.0);
 		const line   = new Float32Array(freqBinCount);
 		const output = new Float32Array(FFT_SIZE);
 		await hackrf.startRx((data) => {

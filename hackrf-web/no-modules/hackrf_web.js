@@ -176,6 +176,12 @@ class FFT {
         return FFT.__wrap(ret);
     }
     /**
+    * @param {number} val
+    */
+    set_smoothing_time_constant(val) {
+        wasm.fft_set_smoothing_time_constant(this.ptr, val);
+    }
+    /**
     * @param {Int8Array} input_
     * @param {Float32Array} result
     */
