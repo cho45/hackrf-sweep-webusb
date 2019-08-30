@@ -6,7 +6,7 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "cho45 <cho45@lowreal.net> (http://www.lowreal.net/)",
-  "license": "ISC",
+  "license": "GPL",
   "description": "",
   "dependencies": {
     "comlink": "^4.0.2"
