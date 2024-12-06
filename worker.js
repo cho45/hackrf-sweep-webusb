@@ -105,7 +105,6 @@ class Worker {
 			window[i] = windowFunction(i / FFT_SIZE);
 		}
 
-		const SAMPLES_PER_BLOCK = HackRF.SAMPLES_PER_BLOCK;
 		const BYTES_PER_BLOCK = HackRF.BYTES_PER_BLOCK;
 
 		let startTime = performance.now();
@@ -119,7 +118,7 @@ class Worker {
 		fft.set_smoothing_time_constant(0.0);
 		const line   = new Float32Array(freqBinCount);
 		const output = new Float32Array(FFT_SIZE);
-		await hackrf.startRx((data) => {
+		await hackrf.startRxSweep((data) => {
 			readBytes += data.length;
 			const now = performance.now();
 			const duration = now - prevTime;
@@ -197,14 +196,14 @@ class Worker {
 
 		console.log('initSweep', [
 			[lowFreq, highFreq],
-			SAMPLES_PER_BLOCK * 2 /* I + Q */,
+			HackRF.BYTES_PER_BLOCK /* I + Q */,
 			SAMPLE_RATE,
 			SAMPLE_RATE / 8 * 3,
 			HackRF.SWEEP_STYLE_INTERLEAVED
 		]);
 		await hackrf.initSweep(
 			[lowFreq, highFreq],
-			SAMPLES_PER_BLOCK * 2 /* I + Q */,
+			HackRF.BYTES_PER_BLOCK /* I + Q */,
 			SAMPLE_RATE,
 			SAMPLE_RATE / 8 * 3,
 			HackRF.SWEEP_STYLE_INTERLEAVED
@@ -245,6 +244,10 @@ class Worker {
 
 	async startRx(callback) {
 		await this.hackrf.startRx(callback);
+	}
+
+	async startRxSweep(callback) {
+		await this.hackrf.startRxSweep(callback);
 	}
 
 	async stopRx() {

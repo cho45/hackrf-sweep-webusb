@@ -71,7 +71,14 @@ new Vue({
 			this.snackbar.show = true;
 			this.snackbar.message = "connecting";
 
-			if (!await this.backend.open()) {
+			let ok = false;
+//			try {
+//				ok = await this.backend.open()
+//			} catch (e) {
+//				alert(e);
+//			}
+
+			if (!ok) {
 				const device = await HackRF.requestDevice();
 				if (!device) {
 					this.snackbar.message = "device is not found";
@@ -156,6 +163,7 @@ new Vue({
 
 			const ctxFft = canvasFft.getContext('2d');
 
+			let prevData = null;
 			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data, metrics) => {
 				this.metrics = metrics;
 				requestAnimationFrame( () => {
@@ -163,6 +171,15 @@ new Vue({
 					const max = Math.max(...data);
 					const min = Math.min(...data);
 					console.log({max,min});
+					*/
+
+					/*
+					if (prevData) {
+						for (let i = 0; i < data.length; i++) {
+							data[i] = (data[i] + prevData[i]) / 2;
+						}
+					}
+					prevData = data;
 					*/
 
 					waterfall.renderLine(data);

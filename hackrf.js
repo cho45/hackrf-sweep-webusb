@@ -77,11 +77,26 @@ class HackRF {
 	static HACKRF_VENDOR_REQUEST_SPIFLASH_CLEAR_STATUS = 34;
 	static HACKRF_VENDOR_REQUEST_OPERACAKE_GPIO_TEST = 35;
 	static HACKRF_VENDOR_REQUEST_CPLD_CHECKSUM = 36;
+	static HACKRF_VENDOR_REQUEST_UI_ENABLE = 37;
+	static HACKRF_VENDOR_REQUEST_OPERACAKE_SET_MODE = 38;
+	static HACKRF_VENDOR_REQUEST_OPERACAKE_GET_MODE = 39;
+	static HACKRF_VENDOR_REQUEST_OPERACAKE_SET_DWELL_TIMES = 40;
+	static HACKRF_VENDOR_REQUEST_GET_M0_STATE = 41;
+	static HACKRF_VENDOR_REQUEST_SET_TX_UNDERRUN_LIMIT = 42;
+	static HACKRF_VENDOR_REQUEST_SET_RX_OVERRUN_LIMIT = 43;
+	static HACKRF_VENDOR_REQUEST_GET_CLKIN_STATUS = 44;
+	static HACKRF_VENDOR_REQUEST_BOARD_REV_READ = 45;
+	static HACKRF_VENDOR_REQUEST_SUPPORTED_PLATFORM_READ = 46;
+	static HACKRF_VENDOR_REQUEST_SET_LEDS = 47;
+	static HACKRF_VENDOR_REQUEST_SET_USER_BIAS_T_OPTS = 48;
+
 	static HACKRF_TRANSCEIVER_MODE_OFF = 0;
 	static HACKRF_TRANSCEIVER_MODE_RECEIVE = 1;
 	static HACKRF_TRANSCEIVER_MODE_TRANSMIT = 2;
 	static HACKRF_TRANSCEIVER_MODE_SS = 3;
 	static TRANSCEIVER_MODE_CPLD_UPDATE = 4;
+	static TRANSCEIVER_MODE_RX_SWEEP = 5;
+
 	static HACKRF_HW_SYNC_MODE_OFF = 0;
 	static HACKRF_HW_SYNC_MODE_ON = 1;
 
@@ -147,7 +162,7 @@ class HackRF {
 
 		console.log('open device', device);
 		await device.open();
-		console.log('selectConfiguration', HackRF.USB_COFIG_STANDARD);
+		console.log('selectConfiguration', HackRF.USB_CONFIG_STANDARD);
 		await device.selectConfiguration(HackRF.USB_CONFIG_STANDARD);
 		console.log('claimInterface');
 		await device.claimInterface(0);
@@ -390,6 +405,35 @@ class HackRF {
 		}
 
 		await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_RECEIVE);
+		const transfer = async (resolve) => {
+			const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
+			if (this.rxRunning) {
+				transfer(resolve);
+			} else {
+				resolve();
+			}
+			// console.log('transferIn', result);
+			if (result) {
+				if (result.status !== 'ok') {
+					throw 'failed to get transfer';
+				}
+				callback(new Uint8Array(result.data.buffer));
+			}
+		}
+		this.rxRunning = [
+			new Promise( resolve => transfer(resolve) ),
+			new Promise( resolve => transfer(resolve) ),
+			new Promise( resolve => transfer(resolve) ),
+			new Promise( resolve => transfer(resolve) )
+		];
+	}
+
+	async startRxSweep(callback) {
+		if (this.rxRunning) {
+			throw "already started";
+		}
+
+		await this.setTransceiverMode(HackRF.TRANSCEIVER_MODE_RX_SWEEP);
 		const transfer = async (resolve) => {
 			const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
 			if (this.rxRunning) {
