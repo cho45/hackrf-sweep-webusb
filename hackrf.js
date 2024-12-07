@@ -25,13 +25,31 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 */
 
 class HackRF {
-	static BOARD_ID_NAME = {
-		0: "JellyBean",
-		1: "JawBreaker",
-		2: "HackRF One",
-		3: "rad1o",
-		255: "Invalid Board ID",
-	};
+	static BOARD_ID_NAME = Object.freeze(new Map([
+		[0, "JellyBean"],
+		[1, "JawBreaker"],
+		[2, "HackRF One"],
+		[3, "rad1o"],
+		[255, "Invalid Board ID"],
+	]));
+
+	static BOARD_REV_UNRECOGNIZED = 0xfe;
+	static BOARD_REV_UNDETECTED = 0xff;
+	static BOARD_REV_NAME = Object.freeze(new Map([
+		[0, "Older than r6"],
+		[1, "r6"],
+		[2, "r7"],
+		[3, "r8"],
+		[4, "r9"],
+		[5, "r10"],
+		[0x81, "GSG r6"],
+		[0x82, "GSG r7"],
+		[0x83, "GSG r8"],
+		[0x84, "GSG r9"],
+		[0x85, "GSG r10"],
+		[HackRF.BOARD_REV_UNRECOGNIZED, "Unknwon"],
+		[HackRF.BOARD_REV_UNDETECTED, "Unknown"],
+	]));
 
 	static USB_CONFIG_STANDARD = 0x1;
 	static TRANSFER_BUFFER_SIZE = 262144 ;
@@ -118,6 +136,7 @@ class HackRF {
 		24000000 ,
 		28000000 
 	];
+
 
 	static computeBasebandFilterBw(bandwidthHz) {
 		const i = HackRF.MAX2837_FT.findIndex( (e) => e >= bandwidthHz );
@@ -218,6 +237,14 @@ class HackRF {
 
 	async readApiVersion() {
 		return [this.device.deviceVersionMajor, this.device.deviceVersionMinor, this.device.deviceVersionSubminor];
+	}
+
+	async usbApiRequired(v) {
+		const [major, minor, subminor] = await this.readApiVersion();
+		const bcdVersion = (major << 8) | (minor << 4) | subminor;
+		if (bcdVersion < v) {
+			throw `USB API version ${v.toString(16)} required, but ${bcdVersion.toString(16)} found`;
+		}
 	}
 
 	async readPartIdSerialNo() {
@@ -429,6 +456,8 @@ class HackRF {
 	}
 
 	async startRxSweep(callback) {
+		await this.usbApiRequired(0x0104);
+
 		if (this.rxRunning) {
 			throw "already started";
 		}
@@ -453,6 +482,23 @@ class HackRF {
 			new Promise( resolve => transfer(resolve) ),
 			new Promise( resolve => transfer(resolve) )
 		];
+	}
+
+	async boardRevRead() {
+		await this.usbApiRequired(0x0106);
+
+		const result = await this.device.controlTransferIn({
+			requestType: "vendor",
+			recipient: "device",
+			request: HackRF.HACKRF_VENDOR_REQUEST_BOARD_REV_READ,
+			value: 0,
+			index: 0,
+		}, 1);
+		console.log(result);
+		if (result.status !== 'ok') {
+			throw 'failed to readBoardId';
+		}
+		return result.data.getUint8(0);
 	}
 
 	async setFreq(freqHz) {

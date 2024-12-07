@@ -72,11 +72,11 @@ new Vue({
 			this.snackbar.message = "connecting";
 
 			let ok = false;
-//			try {
-//				ok = await this.backend.open()
-//			} catch (e) {
-//				alert(e);
-//			}
+			try {
+				ok = await this.backend.open()
+			} catch (e) {
+				alert(e);
+			}
 
 			if (!ok) {
 				const device = await HackRF.requestDevice();
@@ -101,10 +101,10 @@ new Vue({
 
 			this.info.serialNumber = serialNo.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join('');
 			this.info.boardId = boardId;
-			this.info.boardName = HackRF.BOARD_ID_NAME[boardId];
+			this.info.boardName = HackRF.BOARD_ID_NAME.get(boardId);
 			this.info.firmwareVersion = `${versionString} (API:${apiVersion[0]}.${apiVersion[1]}${apiVersion[2]})`;
 			this.info.partIdNumber = partId.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join(' ');
-			this.snackbar.message = `connected to ${HackRF.BOARD_ID_NAME[this.info.boardId]}`;
+			this.snackbar.message = `connected to ${HackRF.BOARD_ID_NAME.get(this.info.boardId)}`;
 			console.log('apply options', this.options);
 			await this.backend.setAmpEnable(this.options.ampEnabled);
 			await this.backend.setAntennaEnable(this.options.antennaEnabled);

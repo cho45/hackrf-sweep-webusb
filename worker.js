@@ -75,10 +75,18 @@ class Worker {
 		const apiVersion = await hackrf.readApiVersion();
 		const { partId, serialNo } = await hackrf.readPartIdSerialNo();
 
+		let boardRev = HackRF.BOARD_REV_UNDETECTED;
+		try {
+			boardRev = await hackrf.boardRevRead();
+		} catch (e) {
+			console.log(e);
+		}
+
 		console.log(`Serial Number: ${serialNo.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join('')}`)
-		console.log(`Board ID Number: ${boardId} (${HackRF.BOARD_ID_NAME[boardId]})`);
+		console.log(`Board ID Number: ${boardId} (${HackRF.BOARD_ID_NAME.get(boardId)})`);
 		console.log(`Firmware Version: ${versionString} (API:${apiVersion[0]}.${apiVersion[1]}${apiVersion[2]})`);
 		console.log(`Part ID Number: ${partId.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join(' ')}`)
+		console.log(`Board Rev: ${HackRF.BOARD_REV_NAME.get(boardRev)} (${boardRev})`)
 		return {boardId, versionString, apiVersion, partId, serialNo };
 	}
 
@@ -257,6 +265,7 @@ class Worker {
 	async close() {
 		await this.hackrf.close();
 		await this.hackrf.exit();
+		await this.hackrf.device.forget();
 	}
 }
 
