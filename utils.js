@@ -70,6 +70,29 @@ export function convertDecibelToRGB (dB) {
 }
 
 
+/**
+ * WebGLを使った高速なウォーターフォール表示
+ *
+ * 【設計の意図】
+ * 2つのテクスチャを循環させることで、テクスチャ全体のシフト（毎フレームの全転送）を回避する。
+ * 1つのテクスチャだけでシフトを実現しようとすると、bandSize × historySize の転送が毎フレーム必要になるが、
+ * この方式では常に bandSize × 1 行分の転送だけで済む。
+ *
+ * 【テクスチャの役割】
+ * - textures[0]: 現在の書き込み先（新しいデータを _current 行目から順に埋めていく）
+ * - textures[1]: 前回使用していたテクスチャ（古いデータの残りを表示する）
+ *
+ * 【シェーダーのロジック】
+ * uOffsetY（現在の書き込み位置）を境界に2つのテクスチャを継ぎ目なく表示:
+ * - 上半分 (screen.y >= uOffsetY): textures[1] を表示（古いデータを下からスクロール）
+ * - 下半分 (screen.y < uOffsetY):  textures[0] を表示（新しいデータを下から積み上げ）
+ *
+ * 【循環のタイミング】
+ * _current が historySize に達したら、textures[0] が「満杯」なので：
+ * 1. textures 配列をローテート（[0,1] → [1,0]）→ 満杯のテクスチャが textures[1] になる
+ * 2. _current を 0 にリセット
+ * 3. 新しい textures[0] の先頭から書き込みを再開
+ */
 export class WaterfallGL {
 	constructor(canvas, bandSize, historySize) {
 		this.bandSize = bandSize;
@@ -107,6 +130,10 @@ export class WaterfallGL {
 
 		const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
 		gl.shaderSource(fragmentShader, `
+			// uTexture0: 現在の書き込みテクスチャ（新しいデータ）
+			// uTexture1: 前回のテクスチャ（古いデータの残り）
+			// uViewCoords: ビューポートサイズ (width, height)
+			// uOffsetY: 現在の書き込み位置（0 〜 historySize-1）
 			uniform sampler2D uTexture0;
 			uniform sampler2D uTexture1;
 			uniform highp vec2 uViewCoords;
@@ -115,10 +142,14 @@ export class WaterfallGL {
 			void main(void) {
 				highp vec4 screen = gl_FragCoord;
 				if (screen.y >= uOffsetY) {
+					// 上半分: 古いデータ（uTexture1）を表示
+					// 下から uOffsetY 分だけスクロールして表示
 					screen.y = uViewCoords.y + uOffsetY - screen.y;
 					highp vec2 screenTexCoord = screen.xy / uViewCoords.xy;
 					gl_FragColor = texture2D(uTexture1, screenTexCoord);
 				} else {
+					// 下半分: 新しいデータ（uTexture0）を表示
+					// 下から順に 0, 1, 2... と積み上がっているので反転
 					screen.y = uViewCoords.y - screen.y + uOffsetY;
 					highp vec2 screenTexCoord = screen.xy / uViewCoords.xy;
 					gl_FragColor = texture2D(uTexture0, screenTexCoord);
@@ -171,7 +202,8 @@ export class WaterfallGL {
 		// texture sources
 		this.textures = [gl.createTexture(), gl.createTexture()];
 
-		// just for initializing
+		// 2の累乗サイズに切り上げてテクスチャを初期化
+		// （古いWebGLの制約への対応。NPOT非対応環境でも動作させる）
 		this.canvas.width  = Math.pow(2, Math.ceil(Math.log2(this.bandSize)));
 		console.log({glInit: this.canvas.width});
 		this.canvas.height = this.historySize;
@@ -236,6 +268,8 @@ export class WaterfallGL {
 		this._current++;
 
 		if (this._current >= this.historySize) {
+			// テクスチャが満杯になったら循環させる
+			// [A, B] → [B, A] となり、A（満杯）が「古いデータ」として使われる
 			this._current = 0;
 			this.textures.push(this.textures.shift());
 

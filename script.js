@@ -162,7 +162,9 @@ new Vue({
 			console.log({lowFreq, highFreq, bandwidth, freqBinCount});
 			const nx = Math.pow(2, Math.ceil(Math.log2(freqBinCount)));
 			const maxTextureSize = 16384;
-			const waterfall = (nx <= maxTextureSize) ?
+			const useWebGL = nx <= maxTextureSize;
+			console.log(`Waterfall: ${useWebGL ? 'WebGL (WaterfallGL)' : 'Canvas 2D (Waterfall)'} - nx=${nx}, maxTextureSize=${maxTextureSize}`);
+			const waterfall = useWebGL ?
 				new WaterfallGL(canvasWf, freqBinCount, 256):
 				new Waterfall(canvasWf, freqBinCount, 256);
 
