@@ -432,27 +432,18 @@ class HackRF {
 		}
 
 		await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_RECEIVE);
-		const transfer = async (resolve) => {
-			const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-			if (this.rxRunning) {
-				transfer(resolve);
-			} else {
-				resolve();
-			}
-			// console.log('transferIn', result);
-			if (result) {
+		const transfer = async () => {
+			await Promise.resolve();
+			while (this.rxRunning) {
+				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
 				if (result.status !== 'ok') {
 					throw 'failed to get transfer';
 				}
 				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
-		}
-		this.rxRunning = [
-			new Promise( resolve => transfer(resolve) ),
-			new Promise( resolve => transfer(resolve) ),
-			new Promise( resolve => transfer(resolve) ),
-			new Promise( resolve => transfer(resolve) )
-		];
+			console.log('rx transfer ended (rx)');
+		};
+		this.rxRunning = [transfer(), transfer()];
 	}
 
 	async startRxSweep(callback) {
@@ -463,25 +454,18 @@ class HackRF {
 		}
 
 		await this.setTransceiverMode(HackRF.TRANSCEIVER_MODE_RX_SWEEP);
-		const transfer = async (resolve) => {
-			const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-			if (this.rxRunning) {
-				transfer(resolve);
-			} else {
-				resolve();
-			}
-			// console.log('transferIn', result);
-			if (result) {
+		const transfer = async () => {
+			await Promise.resolve();
+			while (this.rxRunning) {
+				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
 				if (result.status !== 'ok') {
 					throw 'failed to get transfer';
 				}
 				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
-		}
-		this.rxRunning = [
-			new Promise( resolve => transfer(resolve) ),
-			new Promise( resolve => transfer(resolve) )
-		];
+			console.log('rx transfer ended (rx sweep)');
+		};
+		this.rxRunning = [transfer(), transfer()];
 	}
 
 	async boardRevRead() {
