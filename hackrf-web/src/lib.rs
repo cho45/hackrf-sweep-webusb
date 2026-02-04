@@ -40,6 +40,8 @@ pub struct FFT {
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
     window: Box<[f32]>,
     prev: Box<[f32]>,
+    /// FFT作業用バッファ。再利用してアロケーションを回避
+    buffer: Vec<rustfft::num_complex::Complex<f32>>,
 }
 
 #[wasm_bindgen]
@@ -66,12 +68,14 @@ impl FFT {
         window.copy_from_slice(window_);
         let prev = vec![0.0; n].into_boxed_slice();
         let smoothing_time_constant = 0.0;
+        let buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
         FFT {
             n,
             smoothing_time_constant,
             fft,
             window,
             prev,
+            buffer,
         }
     }
 
@@ -103,11 +107,8 @@ impl FFT {
         let input_i8: &mut [Complex<i8>] =
             unsafe { slice::from_raw_parts_mut(input_ as *mut [i8] as *mut Complex<i8>, self.n) };
 
-        let mut buffer = Vec::<Complex<f32>>::with_capacity(self.n);
-        // with_capacityで領域を確保済みのため、set_lenは安全
-        unsafe {
-            buffer.set_len(self.n);
-        }
+        // 作業用バッファ（構造体に保持して再利用、アロケーション回避）
+        let buffer = &mut self.buffer;
 
         // i8を正規化（-128..127 → -1..1）し、窓関数を適用してf32のバッファに格納
         for i in 0..self.n {
@@ -118,7 +119,7 @@ impl FFT {
         }
 
         // FFT実行（in-place変換）
-        self.fft.process(&mut buffer);
+        self.fft.process(buffer);
 
         // FFT結果をDC中心に再配置
         // FFT出力は [0, 1, ..., n/2-1, -n/2, ..., -1] の順
