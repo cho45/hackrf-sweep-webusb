@@ -24,6 +24,17 @@
 				</div>
 				<div class="form">
 					<div class="field">
+						<label>Preset</label>
+						<div class="field-input">
+							<select v-model="selectedPreset" v-on:change="applyPreset" :disabled="running">
+								<option :value="null">--</option>
+								<optgroup v-for="group in presetGroups" :key="group.label" :label="group.label">
+									<option v-for="p in group.presets" :key="p.name" :value="p.name">{{p.name}} (BW={{p.stop - p.start}}MHz)</option>
+								</optgroup>
+							</select>
+						</div>
+					</div>
+					<div class="field">
 						<label>Start Frequency</label>
 						<div class="field-input">
 							<input v-model.number="range.start" type="number" step="1" min="1" max="6000" required :disabled="running">

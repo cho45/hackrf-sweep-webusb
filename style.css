@@ -124,6 +124,11 @@ html, body {
 	background: #222;
 	color: #fff;
 	font-size: 14px;
+	min-width: 0;
+}
+
+.field-input select {
+	text-overflow: ellipsis;
 }
 
 .field-input input:focus,

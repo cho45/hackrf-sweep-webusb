@@ -63,7 +63,65 @@ createApp({
 				bytesPerSec: 0,
 			},
 
-			currentHover: ""
+			currentHover: "",
+			selectedPreset: null,
+			presetGroups: [
+				{
+					label: "WiFi/ISM",
+					presets: [
+						{ name: "ISM 2.4GHz (Wi-Fi/BLE/Zigbee)", start: 2400, stop: 2485 },
+						{ name: "Wi-Fi 5GHz", start: 5150, stop: 5850 },
+					]
+				},
+				{
+					label: "Cellular (LTE)",
+					presets: [
+						{ name: "Band1 (FDD)", start: 1920, stop: 2170 },
+						{ name: "Band3 (FDD)", start: 1710, stop: 1880 },
+						{ name: "Band8 (FDD)", start: 880, stop: 960 },
+						{ name: "Band19 (FDD)", start: 875, stop: 945 },
+						{ name: "Band20 (FDD)", start: 791, stop: 862 },
+						{ name: "Band21 (FDD)", start: 1450, stop: 1512 },
+						{ name: "Band25 (FDD)", start: 1850, stop: 1995 },
+						{ name: "Band26 (FDD)", start: 814, stop: 894 },
+						{ name: "Band28 (FDD)", start: 703, stop: 803 },
+						{ name: "Band38 (TDD)", start: 2570, stop: 2620 },
+						{ name: "Band39 (TDD)", start: 1880, stop: 1920 },
+						{ name: "Band40 (TDD)", start: 2300, stop: 2400 },
+						{ name: "Band41 (TDD)", start: 2496, stop: 2690 },
+						{ name: "Band42 (TDD)", start: 3400, stop: 3600 },
+					]
+				},
+				{
+					label: "Japan Sub-GHz",
+					presets: [
+						{ name: "Wi-SUN (920MHz)", start: 920, stop: 928 },
+					]
+				},
+				{
+					label: "Broadcast",
+					presets: [
+						{ name: "ISDB-T (Digital TV)", start: 470, stop: 710 },
+					]
+				},
+				{
+					label: "Others",
+					presets: [
+						{ name: "Amateur 430MHz", start: 430, stop: 440 },
+						{ name: "Amateur 144MHz", start: 144, stop: 146 },
+					]
+				},
+			],
+			// Flat preset list for compatibility with existing code
+			get presets() {
+				const result = [];
+				for (const group of this.presetGroups) {
+					for (const preset of group.presets) {
+						result.push(preset);
+					}
+				}
+				return result;
+			}
 		};
 	},
 
@@ -74,6 +132,18 @@ createApp({
 
 		closeAbout: function() {
 			this.$refs.aboutDialog.close();
+		},
+
+		applyPreset: function() {
+			if (this.selectedPreset) {
+				const preset = this.presets.find(p => p.name === this.selectedPreset);
+				if (preset) {
+					this.range.start = preset.start;
+					this.range.stop = preset.stop;
+					// FFTサイズは最大値に設定（startメソッド側で画面サイズに応じて制限される）
+					this.range.fftSize = 8192;
+				}
+			}
 		},
 		connect: async function () {
 			if (!this.backend) {
@@ -283,6 +353,13 @@ createApp({
 		});
 
 		this.$watch('range', () => {
+			// 手動で周波数を変更したらプリセット選択をクリア
+			if (this.selectedPreset) {
+				const preset = this.presets.find(p => p.name === this.selectedPreset);
+				if (!preset || preset.start !== this.range.start || preset.stop !== this.range.stop) {
+					this.selectedPreset = null;
+				}
+			}
 			this.saveSetting();
 		}, { deep: true });
 
