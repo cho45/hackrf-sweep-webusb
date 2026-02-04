@@ -589,4 +589,6 @@ class HackRF {
 	}
 }
 
+export { HackRF };
+
 

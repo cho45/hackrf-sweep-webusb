@@ -20,3 +20,31 @@ There are no requirements except a browser supporting WebUSB (available by defau
 1. Communication with HackRF device with <strong>WebUSB</strong>.
 2. Run FFT with <strong>WebAssembly</strong> which is written in Rust (using <a href="https://github.com/awelkie/RustFFT">RustFFT</a>)
 3. Show results with <strong>WebGL</strong> waterfall implementation.
+
+## Build WASM module (Rust)
+
+Requirements: Rust, wasm-pack, cargo-make (optional)
+
+Install wasm-pack:
+
+```bash
+cargo install --force wasm-pack
+```
+
+Install cargo-make (optional, for building all targets):
+
+```bash
+cargo install --force cargo-make
+```
+
+```bash
+cd hackrf-web
+wasm-pack build --target web --out-dir ../public/wasm
+```
+
+Or using cargo-make (which builds all targets):
+
+```bash
+cd hackrf-web
+cargo make build
+```

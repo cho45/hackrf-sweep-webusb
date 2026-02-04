@@ -10,8 +10,6 @@
 		<link rel="stylesheet" href="https://unpkg.com/vue-material/dist/theme/default.css">
 
 
-		<script src="hackrf.js"></script>
-		<script src="utils.js"></script>
 		<script src="https://unpkg.com/vue@2.7.13"></script>
 		<script src="https://unpkg.com/vue-material"></script>
 		<script src="script.js" type="module"></script>
@@ -70,7 +68,7 @@
 			<div class="actions">
 				<div style="margin-left: -8px">
 					<template v-if="!connected">
-						<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected">connect</md-button>
+						<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected" :disabled="!backend">connect</md-button>
 					</template>
 					<template v-if="connected">
 						<md-button class="md-raised md-primary" v-on:click="start" v-if="!running">start</md-button>

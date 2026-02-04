@@ -19,15 +19,17 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 */
 
 import * as Comlink from "./node_modules/comlink/dist/esm/comlink.mjs";
+import { HackRF } from "./hackrf.js";
+import { Waterfall, WaterfallGL } from "./utils.js";
 
-//const Backend = Comlink.wrap(new Worker("./worker.js", { type: "module" }));
-const Backend = Comlink.wrap(new Worker("./worker.js"));
+const Backend = Comlink.wrap(new Worker("./worker.js", { type: "module" }));
 
 Vue.use(VueMaterial.default);
 
 new Vue({
 	el: "#app",
 	data: {
+		backend: null,
 		connected: false,
 		running: false,
 		snackbar: {
@@ -68,6 +70,12 @@ new Vue({
 
 	methods: {
 		connect: async function () {
+			if (!this.backend) {
+				this.snackbar.show = true;
+				this.snackbar.message = "backend not initialized yet";
+				return;
+			}
+
 			this.snackbar.show = true;
 			this.snackbar.message = "connecting";
 
@@ -240,8 +248,11 @@ new Vue({
 	created: async function () {
 		this.loadSetting();
 
+		console.log("creating backend");
 		this.backend = await new Backend();
+		console.log("backend created");
 		await this.backend.init();
+		console.log('backend initialized');
 
 		this.$watch('options.ampEnabled', async (val) => {
 			if (!this.connected) return;

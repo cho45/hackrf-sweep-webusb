@@ -9,6 +9,6 @@
   "license": "GPL",
   "description": "",
   "dependencies": {
-    "comlink": "^4.0.2"
+    "comlink": "^4.4.2"
   }
 }

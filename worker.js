@@ -5,12 +5,12 @@ All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
     Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the 
+    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the
     documentation and/or other materials provided with the distribution.
     Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
     without specific prior written permission.
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, 
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
 THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
 IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
 (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
@@ -18,16 +18,23 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-//import * as Comlink from "./node_modules/comlink/dist/esm/comlink.mjs";
-importScripts("./node_modules/comlink/dist/umd/comlink.js");
-importScripts("./hackrf.js");
+import * as Comlink from "./node_modules/comlink/dist/esm/comlink.mjs";
+import { HackRF } from "./hackrf.js";
+import init, { FFT } from "./hackrf-web/pkg/hackrf_web.js";
 
-const lib = {};
-(() => {
-	importScripts("./hackrf-web/no-modules/hackrf_web.js");
-	lib.wasm_bindgen = self.wasm_bindgen;
-	console.log(lib);
-})();
+// wasm モジュール（トップレベルでインポート）
+console.log('worker: imported');
+
+let wasmInitialized = false;
+
+async function ensureWasmInitialized() {
+	if (!wasmInitialized) {
+		console.log('worker: loading wasm...');
+		await init({ module_or_path: "./hackrf-web/pkg/hackrf_web_bg.wasm" });
+		wasmInitialized = true;
+		console.log('worker: wasm loaded');
+	}
+}
 
 class Worker {
 	constructor() {
@@ -35,11 +42,10 @@ class Worker {
 
 	async init() {
 		console.log('init worker');
-		await lib.wasm_bindgen("./hackrf-web/no-modules/hackrf_web_bg.wasm");
+		await ensureWasmInitialized();
 	}
 
 	async open(opts) {
-
 		const devices = await navigator.usb.getDevices();
 		const device = !opts ? devices[0] : devices.find( d => {
 			if (opts.vendorId) {
@@ -51,7 +57,7 @@ class Worker {
 				if (d.productId !== opts.productId) {
 					return false;
 				}
-			} 
+			}
 			if (opts.serialNumber) {
 				if (d.serialNumber !== opts.serialNumber) {
 					return false;
@@ -122,7 +128,7 @@ class Worker {
 		let sweepCount = 0;
 		let sweepPerSec = 0;
 
-		const fft = new lib.wasm_bindgen.FFT(FFT_SIZE, window);
+		const fft = new FFT(FFT_SIZE, window);
 		fft.set_smoothing_time_constant(0.0);
 		const line   = new Float32Array(freqBinCount);
 		const output = new Float32Array(FFT_SIZE);
@@ -219,7 +225,7 @@ class Worker {
 	}
 
 	async setSampleRateManual(freq, divider) {
-		await this.hackrf.setSampleRateManual(freq, devider);
+		await this.hackrf.setSampleRateManual(freq, divider);
 	}
 
 	async setBasebandFilterBandwidth(bandwidthHz) {
@@ -269,4 +275,6 @@ class Worker {
 	}
 }
 
+console.log('worker: before Comlink.expose');
 Comlink.expose(Worker);
+console.log('worker: after Comlink.expose');
