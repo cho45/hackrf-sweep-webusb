@@ -8,13 +8,11 @@
   "files": [
     "hackrf_web_bg.wasm",
     "hackrf_web.js",
-    "hackrf_web_bg.js",
     "hackrf_web.d.ts"
   ],
   "main": "hackrf_web.js",
   "types": "hackrf_web.d.ts",
   "sideEffects": [
-    "./hackrf_web.js",
     "./snippets/*"
   ]
 }

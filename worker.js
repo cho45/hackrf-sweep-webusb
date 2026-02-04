@@ -30,7 +30,7 @@ let wasmInitialized = false;
 async function ensureWasmInitialized() {
 	if (!wasmInitialized) {
 		console.log('worker: loading wasm...');
-		await init({ module_or_path: "./hackrf-web/pkg/hackrf_web_bg.wasm" });
+		await init();
 		wasmInitialized = true;
 		console.log('worker: wasm loaded');
 	}
