@@ -1,0 +1,352 @@
+/*
+Copyright (c) 2019, cho45 <cho45@lowreal.net>
+
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
+    Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+    Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+/* Base */
+html, body {
+	margin: 0;
+	padding: 0;
+	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+	font-size: 14px;
+}
+
+#app {
+	display: flex;
+	min-height: 100vh;
+}
+
+/* Layout */
+.actions {
+	padding: 16px;
+	width: 280px;
+	flex-shrink: 0;
+	background: #111;
+	color: #ccc;
+	border-right: 1px solid #333;
+}
+
+.canvas-container {
+	flex-grow: 1;
+	background: #000;
+}
+
+#fft,
+#waterfall {
+	width: 100%;
+	height: 100%;
+	display: block;
+}
+
+/* Buttons */
+.btn {
+	display: inline-block;
+	padding: 8px 16px;
+	margin: 4px;
+	border: none;
+	border-radius: 4px;
+	background: #4caf50;
+	color: #fff;
+	font-size: 14px;
+	text-transform: uppercase;
+	cursor: pointer;
+	transition: background 0.2s;
+}
+
+.btn:hover:not(:disabled) {
+	background: #43a047;
+}
+
+.btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.btn-primary {
+	background: #2196f3;
+}
+
+.btn-primary:hover:not(:disabled) {
+	background: #1e88e5;
+}
+
+.btn-secondary {
+	background: #757575;
+}
+
+.btn-secondary:hover:not(:disabled) {
+	background: #616161;
+}
+
+/* Form */
+.form {
+	margin-top: 16px;
+}
+
+.field {
+	margin-bottom: 12px;
+}
+
+.field label {
+	display: block;
+	margin-bottom: 4px;
+	font-size: 12px;
+	color: #888;
+}
+
+.field-input {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.field-input input,
+.field-input select {
+	flex: 1;
+	padding: 8px 12px;
+	border: 1px solid #444;
+	border-radius: 4px;
+	background: #222;
+	color: #fff;
+	font-size: 14px;
+}
+
+.field-input input:focus,
+.field-input select:focus {
+	outline: none;
+	border-color: #2196f3;
+}
+
+.field-input input:disabled,
+.field-input select:disabled {
+	opacity: 0.5;
+}
+
+.field-suffix {
+	position: absolute;
+	right: 12px;
+	color: #888;
+	font-size: 12px;
+	pointer-events: none;
+}
+
+/* Checkbox */
+.checkbox {
+	display: flex;
+	align-items: center;
+	margin-bottom: 8px;
+	cursor: pointer;
+}
+
+.checkbox input[type="checkbox"] {
+	margin-right: 8px;
+	cursor: pointer;
+}
+
+/* Divider */
+.divider {
+	height: 1px;
+	background: #333;
+	margin: 16px 0;
+}
+
+/* Typography */
+.caption {
+	margin: 8px 0;
+	font-size: 12px;
+	color: #888;
+}
+
+.body-2 {
+	font-size: 14px;
+	color: #ccc;
+}
+
+.subheading {
+	font-size: 14px;
+	font-weight: 500;
+	color: #fff;
+	margin: 8px 0;
+}
+
+/* Info link */
+.info-link {
+	display: inline-block;
+	margin-top: 16px;
+	padding: 4px 8px;
+	color: #888;
+	cursor: pointer;
+	font-size: 12px;
+}
+
+.info-link:hover {
+	color: #2196f3;
+}
+
+/* Snackbar (toast) */
+@keyframes snackbar-fade {
+	0%, 80% {
+		opacity: 1;
+	}
+	100% {
+		opacity: 0;
+	}
+}
+
+.snackbar {
+	position: fixed;
+	bottom: 16px;
+	left: 50%;
+	transform: translateX(-50%);
+	padding: 12px 24px;
+	background: #323232;
+	color: #fff;
+	border-radius: 4px;
+	font-size: 14px;
+	z-index: 1000;
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.3s;
+}
+
+.snackbar.show {
+	animation: snackbar-fade 4s forwards;
+}
+
+/* Dialog */
+dialog {
+	background: #1e1e1e;
+	color: #fff;
+	border: none;
+	border-radius: 8px;
+	padding: 0;
+	max-width: 500px;
+}
+
+dialog::backdrop {
+	background: rgba(0, 0, 0, 0.5);
+}
+
+dialog h3 {
+	margin: 0;
+	padding: 16px 24px;
+	font-size: 18px;
+	font-weight: 500;
+	border-bottom: 1px solid #333;
+}
+
+dialog .dialog-content {
+	padding: 16px 24px;
+}
+
+dialog .dialog-content p {
+	margin: 8px 0;
+}
+
+dialog .dialog-content a {
+	color: #2196f3;
+}
+
+dialog .dialog-content .subheading {
+	margin: 8px 0;
+	font-size: 14px;
+	font-weight: 500;
+	color: #fff;
+}
+
+dialog .dialog-content ul {
+	padding-left: 20px;
+	margin-bottom: 0;
+}
+
+dialog .dialog-footer {
+	padding: 8px 16px;
+	display: flex;
+	justify-content: flex-end;
+	border-top: 1px solid #333;
+}
+
+/* Custom Dialog (for alerts) */
+.dialog-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	background: rgba(0, 0, 0, 0.5);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 999;
+}
+
+.dialog {
+	background: #1e1e1e;
+	border-radius: 4px;
+	min-width: 320px;
+	max-width: 500px;
+	color: #fff;
+}
+
+.dialog-header {
+	padding: 16px 24px;
+	border-bottom: 1px solid #333;
+}
+
+.dialog-title {
+	margin: 0;
+	font-size: 18px;
+	font-weight: 500;
+}
+
+.dialog-body {
+	padding: 16px 24px;
+}
+
+.dialog-body p {
+	margin: 8px 0;
+	padding: 0;
+}
+
+.dialog-body a {
+	color: #2196f3;
+}
+
+.dialog-footer {
+	padding: 8px 16px;
+	display: flex;
+	justify-content: flex-end;
+	border-top: 1px solid #333;
+}
+
+/* Axis labels */
+.axis {
+	position: absolute;
+	top: 0;
+	font-weight: bold;
+	font-size: 14px;
+	color: #fff;
+	border-left: 2px solid #f33;
+	padding: 0 4px;
+	background: rgba(0,0,0,0.5);
+}
+
+.axis.right {
+	border-left: none;
+	border-right: 2px solid #f33;
+}

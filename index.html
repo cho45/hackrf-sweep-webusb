@@ -5,150 +5,124 @@
 		<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"/>
 
 		<title>HackRF Sweep Mode WebUSB</title>
-		<link rel="stylesheet" href="//fonts.googleapis.com/css?family=Roboto:400,500,700,400italic|Material+Icons">
-		<link rel="stylesheet" href="https://unpkg.com/vue-material/dist/vue-material.min.css">
-		<link rel="stylesheet" href="https://unpkg.com/vue-material/dist/theme/default.css">
-
-
-		<script src="https://unpkg.com/vue@2.7.13"></script>
-		<script src="https://unpkg.com/vue-material"></script>
+		<link rel="stylesheet" href="style.css">
 		<script src="script.js" type="module"></script>
-		<style>
-			html, body {
-				margin: 0;
-				padding: 0;
-			}
-
-			#app {
-				display: flex;
-			}
-
-			.actions {
-				padding: 10px;
-				width: 17em;
-			}
-
-			.canvas-container {
-				flex-grow: 1;
-				background: #000;
-			}
-
-			#fft,
-			#waterfall {
-				width: 100%;
-				height: 100%;
-			}
-
-			.form {
-			}
-
-			.md-checkbox {
-				display: flex;
-			}
-
-			.axis {
-				position: absolute;
-				top: 0;
-				font-weight: bold;
-				font-size: 16px;
-				color: #fff;
-				border-style: solid;
-				border-width: 0 0 0 2px;
-				border-color: #f33;
-				padding: 0 2px;
-			}
-
-			.axis.right {
-				border-width: 0 2px 0 0;
-			}
-		</style>
 	</head>
 	<body>
 		<div id="app">
 			<div class="actions">
-				<div style="margin-left: -8px">
+				<div>
 					<template v-if="!connected">
-						<md-button class="md-raised md-primary" v-on:click="connect" v-if="!connected" :disabled="!backend">connect</md-button>
+						<button class="btn btn-primary" v-on:click="connect" :disabled="!backend">connect</button>
 					</template>
 					<template v-if="connected">
-						<md-button class="md-raised md-primary" v-on:click="start" v-if="!running">start</md-button>
-						<md-button class="md-raised" v-on:click="stop" v-if="running">stop</md-button>
-						<md-button class="" v-on:click="disconnect" v-if="connected">disconnect</md-button>
+						<button class="btn btn-primary" v-on:click="start" v-if="!running">start</button>
+						<button class="btn btn-secondary" v-on:click="stop" v-if="running">stop</button>
+						<button class="btn" v-on:click="disconnect" v-if="connected">disconnect</button>
 					</template>
-					<div class="md-caption" style="margin: 0 8px">{{metrics.sweepPerSec.toFixed(1)}} sweep/sec {{(metrics.bytesPerSec/1e6).toFixed(1)}} MB/sec</div>
+					<div class="caption">{{metrics.sweepPerSec.toFixed(1)}} sweep/sec {{(metrics.bytesPerSec/1e6).toFixed(1)}} MB/sec</div>
 				</div>
 				<div class="form">
-					<md-field>
+					<div class="field">
 						<label>Start Frequency</label>
-						<md-input v-model="range.start" type="number" step="1" min="1" max="6000" required :disabled="running"></md-input>
-						<span class="md-suffix">MHz</span>
-					</md-field>
-					<md-field>
+						<div class="field-input">
+							<input v-model.number="range.start" type="number" step="1" min="1" max="6000" required :disabled="running">
+							<span class="field-suffix">MHz</span>
+						</div>
+					</div>
+					<div class="field">
 						<label>End Frequency</label>
-						<md-input v-model="range.stop" type="number" step="1" min="1" max="6000" required :disabled="running"></md-input>
-						<span class="md-suffix">MHz</span>
-					</md-field>
-					<md-field>
+						<div class="field-input">
+							<input v-model.number="range.stop" type="number" step="1" min="1" max="6000" required :disabled="running">
+							<span class="field-suffix">MHz</span>
+						</div>
+					</div>
+					<div class="field">
 						<label>FFT Size</label>
-						<!--
-						<md-input v-model="range.fftSize" type="number" step="1" required :disabled="running"></md-input>
-						-->
-						<md-select v-model="range.fftSize">
-							<md-option value="8">8</md-option>
-							<md-option value="16">16</md-option>
-							<md-option value="32">32</md-option>
-							<md-option value="64">64</md-option>
-							<md-option value="128">128</md-option>
-							<md-option value="256">256</md-option>
-							<md-option value="512">512</md-option>
-							<md-option value="1024">1024</md-option>
-							<md-option value="2048">2048</md-option>
-							<md-option value="4096">4096</md-option>
-							<md-option value="8192">8192</md-option>
-						</md-select>
-					</md-field>
-					<md-divider></md-divider>
-					<md-field>
+						<div class="field-input">
+							<select v-model.number="range.fftSize" :disabled="running">
+								<option value="8">8</option>
+								<option value="16">16</option>
+								<option value="32">32</option>
+								<option value="64">64</option>
+								<option value="128">128</option>
+								<option value="256">256</option>
+								<option value="512">512</option>
+								<option value="1024">1024</option>
+								<option value="2048">2048</option>
+								<option value="4096">4096</option>
+								<option value="8192">8192</option>
+							</select>
+						</div>
+					</div>
+					<div class="divider"></div>
+					<div class="field">
 						<label>LNA Gain (IF)</label>
-						<md-input v-model="options.lnaGain" type="number" step="8" max="40" min="0" required></md-input>
-						<span class="md-suffix">dB</span>
-					</md-field>
-					<md-field>
+						<div class="field-input">
+							<input v-model.number="options.lnaGain" type="number" step="8" max="40" min="0" required>
+							<span class="field-suffix">dB</span>
+						</div>
+					</div>
+					<div class="field">
 						<label>VGA Gain (Baseband)</label>
-						<md-input v-model="options.vgaGain" type="number" step="2" max="62" min="0" required></md-input>
-						<span class="md-suffix">dB</span>
-					</md-field>
-					<md-checkbox v-model="options.ampEnabled">RF Amp (14dB)</md-checkbox>
-					<md-checkbox v-model="options.antennaEnabled">Antenna Port Power</md-checkbox>
+						<div class="field-input">
+							<input v-model.number="options.vgaGain" type="number" step="2" max="62" min="0" required>
+							<span class="field-suffix">dB</span>
+						</div>
+					</div>
+					<label class="checkbox">
+						<input type="checkbox" v-model="options.ampEnabled">
+						RF Amp (14dB)
+					</label>
+					<label class="checkbox">
+						<input type="checkbox" v-model="options.antennaEnabled">
+						Antenna Port Power
+					</label>
 				</div>
-				<span class="md-body-2">
+				<div class="body-2">
 					{{ info.boardName }} (id:{{ info.boardId }})<br>
 					{{ info.firmwareVersion }}
-				</span>
-				<div  v-on:click="showInfo=true">
-					<md-icon>info</md-icon>
+				</div>
+				<div class="info-link" v-on:click="openAbout">
+					[About]
 				</div>
 
-				<md-snackbar :md-active.sync="snackbar.show" md-persistent>
+				<!-- Snackbar -->
+				<div class="snackbar" :class="{ show: snackbar.show }">
 					{{ snackbar.message }}
-				</md-snackbar>
-				<md-dialog-alert :md-active.sync="alert.show" :md-title="alert.title" :md-content="alert.content"></md-dialog-alert>
+				</div>
 
-				<md-dialog :md-active.sync="showInfo">
-					<md-dialog-title>About</md-dialog-title>
-					<md-dialog-content>
+				<!-- Alert Dialog -->
+				<div class="dialog-overlay" v-if="alert.show" v-on:click.self="alert.show = false">
+					<div class="dialog">
+						<div class="dialog-header">
+							<h3 class="dialog-title">{{ alert.title }}</h3>
+						</div>
+						<div class="dialog-body">
+							{{ alert.content }}
+						</div>
+						<div class="dialog-footer">
+							<button class="btn" v-on:click="alert.show = false">Close</button>
+						</div>
+					</div>
+				</div>
+
+				<!-- About Dialog -->
+				<dialog ref="aboutDialog">
+					<h3>About</h3>
+					<div class="dialog-content">
 						<p>HackRF Sweep WebUSB</p>
-						<p>Repo: <a href="https://github.com/cho45/hackrf-sweep-webusb">github.com/cho45/hackrf-sweep-webusb</a></p>
+						<p>Repo: <a href="https://github.com/cho45/hackrf-sweep-webusb" target="_blank">github.com/cho45/hackrf-sweep-webusb</a></p>
 						<p>Author: <a href="https://www.lowreal.net">cho45 &lt;cho45@lowreal.net&gt;</a></p>
-						<span class="md-subheading">Links</span>
+						<div class="subheading">Links</div>
 						<ul>
-							<li><a href="https://greatscottgadgets.com/hackrf/">HackRF</a> (<a href="https://github.com/mossmann/hackrf/">github</a>)</li>
+							<li><a href="https://greatscottgadgets.com/hackrf/" target="_blank">HackRF</a> (<a href="https://github.com/mossmann/hackrf/" target="_blank">github</a>)</li>
 						</ul>
-					</md-dialog-content>
-					<md-dialog-actions>
-						<md-button class="md-primary" @click="showInfo = false">Close</md-button>
-					</md-dialog-actions>
-				</md-dialog>
+					</div>
+					<div class="dialog-footer">
+						<button class="btn btn-primary" v-on:click="closeAbout">Close</button>
+					</div>
+				</dialog>
 			</div>
 			<div class="canvas-container">
 				<div style="width: 100%; height: 70vh; position: relative">

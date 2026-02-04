@@ -18,57 +18,63 @@ HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABI
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+import { createApp } from "https://unpkg.com/vue@3/dist/vue.esm-browser.js";
 import * as Comlink from "./node_modules/comlink/dist/esm/comlink.mjs";
 import { HackRF } from "./hackrf.js";
 import { Waterfall, WaterfallGL } from "./utils.js";
 
 const Backend = Comlink.wrap(new Worker("./worker.js", { type: "module" }));
 
-Vue.use(VueMaterial.default);
+createApp({
+	data() {
+		return {
+			backend: null,
+			connected: false,
+			running: false,
+			snackbar: {
+				show: false,
+				message: ""
+			},
+			alert: {
+				show: false,
+				title: "",
+				content: ""
+			},
+			range: {
+				start: 2400,
+				stop: 2500,
+				fftSize: 256
+			},
+			options: {
+				ampEnabled: false,
+				antennaEnabled: false,
+				lnaGain: 16,
+				vgaGain: 16
+			},
+			info : {
+				serialNumber: "",
+				boardId: "",
+				boardName: "",
+				partIdNumber: "",
+				firmwareVersion: "",
+			},
+			metrics: {
+				sweepPerSec: 0,
+				bytesPerSec: 0,
+			},
 
-new Vue({
-	el: "#app",
-	data: {
-		backend: null,
-		connected: false,
-		running: false,
-		snackbar: {
-			show: false,
-			message: ""
-		},
-		alert: {
-			show: false,
-			title: "",
-			content: ""
-		},
-		range: {
-			start: 2400,
-			stop: 2500,
-			fftSize: 256
-		},
-		options: {
-			ampEnabled: false,
-			antennaEnabled: false,
-			lnaGain: 16,
-			vgaGain: 16
-		},
-		info : {
-			serialNumber: "",
-			boardId: "",
-			boardName: "",
-			partIdNumber: "",
-			firmwareVersion: "",
-		},
-		metrics: {
-			sweepPerSec: 0,
-			bytesPerSec: 0,
-		},
-
-		currentHover: "",
-		showInfo: false
+			currentHover: ""
+		};
 	},
 
 	methods: {
+		openAbout: function() {
+			this.$refs.aboutDialog.showModal();
+		},
+
+		closeAbout: function() {
+			this.$refs.aboutDialog.close();
+		},
 		connect: async function () {
 			if (!this.backend) {
 				this.snackbar.show = true;
@@ -310,5 +316,5 @@ new Vue({
 
 	mounted: function () {
 	}
-});
+}).mount('#app');
 
