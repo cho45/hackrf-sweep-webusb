@@ -1,16 +1,5 @@
-extern crate console_error_panic_hook;
-extern crate wasm_bindgen;
-
-//extern crate wee_alloc;
-// Use `wee_alloc` as the global allocator.
-//#[global_allocator]
-//static ALLOC: wee_alloc::WeeAlloc = wee_alloc::WeeAlloc::INIT;
-
-//use std::sync::Arc;
 use rustfft::num_complex::Complex;
 use rustfft::FftPlanner;
-//use rustfft::num_traits::Zero;
-//use std::mem;
 use std::slice;
 
 use wasm_bindgen::prelude::*;
@@ -83,7 +72,19 @@ impl FFT {
         self.smoothing_time_constant = val;
     }
 
-    /// FFTを実行し、結果をdBスケールで出力する。
+    /// HackRF One の IQ サンプル列に対して複素 FFT を実行し、
+    /// スペクトログラムのウォーターフォール表示に必要な前処理を全て行う。
+    ///
+    /// このメソッドは以下の処理をワンパスで実行する：
+    /// 1. IQ サンプルの正規化（i8 → f32）
+    /// 2. 窓関数の適用
+    /// 3. 複素 FFT
+    /// 4. DC 中心配置への周波数軸の並べ替え
+    /// 5. 指数移動平均によるスムージング（設定時）
+    /// 6. dB スケールへの変換
+    ///
+    /// 出力された配列は、そのままスペクトログラムの1行（時刻 t におけるスペクトル）として
+    /// ウォーターフォール表示に使用できる。
     ///
     /// # 入力形式
     /// * `input_` - i8の配列として表現された複素数列 `[re0, im0, re1, im1, ...]`
