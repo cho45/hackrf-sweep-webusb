@@ -444,7 +444,7 @@ class HackRF {
 				if (result.status !== 'ok') {
 					throw 'failed to get transfer';
 				}
-				callback(new Uint8Array(result.data.buffer));
+				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
 		}
 		this.rxRunning = [
@@ -475,7 +475,7 @@ class HackRF {
 				if (result.status !== 'ok') {
 					throw 'failed to get transfer';
 				}
-				callback(new Uint8Array(result.data.buffer));
+				callback(new Uint8Array(result.data.buffer, 0, result.data.byteLength));
 			}
 		}
 		this.rxRunning = [
