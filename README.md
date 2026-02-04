@@ -23,28 +23,20 @@ There are no requirements except a browser supporting WebUSB (available by defau
 
 ## Build WASM module (Rust)
 
-Requirements: Rust, wasm-pack, cargo-make (optional)
+Requirements: Rust, cargo-make
 
-Install wasm-pack:
-
-```bash
-cargo install --force wasm-pack
-```
-
-Install cargo-make (optional, for building all targets):
+Install cargo-make:
 
 ```bash
 cargo install --force cargo-make
 ```
 
 ```bash
-cd hackrf-web
-wasm-pack build --target web --out-dir ../public/wasm
+cargo make build
 ```
 
-Or using cargo-make (which builds all targets):
+## Test
 
 ```bash
-cd hackrf-web
-cargo make build
+cargo make test
 ```
