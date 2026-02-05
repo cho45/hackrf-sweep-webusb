@@ -5,7 +5,19 @@ export class FFT {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * FFTを実行し、結果をdBスケールで出力する。
+     * HackRF One の IQ サンプル列に対して複素 FFT を実行し、
+     * スペクトログラムのウォーターフォール表示に必要な前処理を全て行う。
+     *
+     * このメソッドは以下の処理をワンパスで実行する：
+     * 1. IQ サンプルの正規化（i8 → f32）
+     * 2. 窓関数の適用
+     * 3. 複素 FFT
+     * 4. DC 中心配置への周波数軸の並べ替え
+     * 5. 指数移動平均によるスムージング（設定時）
+     * 6. dB スケールへの変換
+     *
+     * 出力された配列は、そのままスペクトログラムの1行（時刻 t におけるスペクトル）として
+     * ウォーターフォール表示に使用できる。
      *
      * # 入力形式
      * * `input_` - i8の配列として表現された複素数列 `[re0, im0, re1, im1, ...]`
@@ -48,7 +60,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_fft_free: (a: number, b: number) => void;
-    readonly fft_fft: (a: number, b: number, c: number, d: any, e: number, f: number, g: any) => void;
+    readonly fft_fft: (a: number, b: number, c: number, d: number, e: number, f: any) => void;
     readonly fft_new: (a: number, b: number, c: number) => number;
     readonly fft_set_smoothing_time_constant: (a: number, b: number) => void;
     readonly set_panic_hook: () => void;

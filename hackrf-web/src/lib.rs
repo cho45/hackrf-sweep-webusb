@@ -27,10 +27,11 @@ pub struct FFT {
     n: usize,
     smoothing_time_constant: f32,
     fft: std::sync::Arc<dyn rustfft::Fft<f32>>,
-    window: Box<[f32]>,
     prev: Box<[f32]>,
     /// FFT作業用バッファ。再利用してアロケーションを回避
     buffer: Vec<rustfft::num_complex::Complex<f32>>,
+    /// スケーリング（1/128 と 1/n）を含めた窓関数
+    scaled_window: Box<[f32]>,
 }
 
 #[wasm_bindgen]
@@ -53,18 +54,23 @@ impl FFT {
         assert_eq!(window_.len(), n, "Window size must match FFT size (expected {}, got {})", n, window_.len());
 
         let fft = FftPlanner::new().plan_fft_forward(n);
-        let mut window = vec![0.0; n].into_boxed_slice();
-        window.copy_from_slice(window_);
         let prev = vec![0.0; n].into_boxed_slice();
         let smoothing_time_constant = 0.0;
         let buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
+
+        // 窓関数にスケーリング係数を事前に適用しておく
+        // 1/128: i8 (-128..127) を -1..1 に正規化
+        // 1/n: FFTの正規化
+        let scale = 1.0 / (128.0 * n as f32);
+        let scaled_window = window_.iter().map(|&w| w * scale).collect::<Vec<_>>().into_boxed_slice();
+
         FFT {
             n,
             smoothing_time_constant,
             fft,
-            window,
             prev,
             buffer,
+            scaled_window,
         }
     }
 
@@ -102,58 +108,54 @@ impl FFT {
     /// # 安全性
     /// この関数は unsafe なメモリ再解釈を使用する。コントラクトに違反する場合、
     /// 未定義動作を引き起こす可能性がある。
-    pub fn fft(&mut self, input_: &mut [i8], result: &mut [f32]) {
+    pub fn fft(&mut self, input_: &[i8], result: &mut [f32]) {
+        debug_assert_eq!(input_.len(), self.n * 2, "Input length must be n * 2");
+        debug_assert_eq!(result.len(), self.n, "Result length must be n");
+
         // i8配列 [re0, im0, re1, im1, ...] を Complex<i8> スライスとして再解釈
-        // Complex<i8> は {re: i8, im: i8} で表現されるため、メモリレイアウトは互換
-        let input_i8: &mut [Complex<i8>] =
-            unsafe { slice::from_raw_parts_mut(input_ as *mut [i8] as *mut Complex<i8>, self.n) };
+        let input_complex: &[Complex<i8>] = unsafe {
+            slice::from_raw_parts(input_.as_ptr() as *const Complex<i8>, self.n)
+        };
 
         // 作業用バッファ（構造体に保持して再利用、アロケーション回避）
         let buffer = &mut self.buffer;
 
-        // i8を正規化（-128..127 → -1..1）し、窓関数を適用してf32のバッファに格納
+        // 正規化と窓関数の適用。scaled_window に 1/128 と 1/n のスケールが含まれている。
         for i in 0..self.n {
             buffer[i] = Complex {
-                re: (input_i8[i].re as f32) / 128_f32,
-                im: (input_i8[i].im as f32) / 128_f32,
-            } * self.window[i];
+                re: input_complex[i].re as f32,
+                im: input_complex[i].im as f32,
+            } * self.scaled_window[i];
         }
 
         // FFT実行（in-place変換）
         self.fft.process(buffer);
 
-        // FFT結果をDC中心に再配置
-        // FFT出力は [0, 1, ..., n/2-1, -n/2, ..., -1] の順
-        // これを [-n/2, ..., -1, 0, 1, ..., n/2-1] の順に並べ替え
+        // 以下の処理を1パスに統合：
+        // 1. DC中心配置への再配置
+        // 2. 指数移動平均によるスムージング
+        // 3. dBスケールへの変換
         let half_n = self.n / 2;
-        for i in 0..half_n {
-            // 正の周波数成分 → result の後半に
-            result[i + half_n] = buffer[i].norm() / (self.n as f32);
-        }
-        for i in half_n..self.n {
-            // 負の周波数成分 → result の前半に
-            result[i - half_n] = buffer[i].norm() / (self.n as f32);
-        }
-
-        // 指数移動平均によるスムージング
-        // result[k] = α * prev[k] + (1 - α) * current[k]
-        // これによりスペクトログラムの時間方向の変化が滑らかになる
-        if self.smoothing_time_constant > 0.0 {
-            for i in 0..self.n {
-                let x_p = self.prev[i];
-                let x_k = result[i];
-                result[i] =
-                    self.smoothing_time_constant * x_p + (1.0 - self.smoothing_time_constant) * x_k;
-            }
-
-            self.prev.copy_from_slice(result);
-        }
+        let alpha = self.smoothing_time_constant;
+        let inv_alpha = 1.0 - alpha;
 
         for i in 0..self.n {
+            // result[i] に入れるべき成分の、buffer内でのインデックスを計算（DC Shift）
+            let src_idx = if i < half_n { i + half_n } else { i - half_n };
+            
+            // すでに scaled_window により 1/n 倍されているため、norm() するだけでよい
+            let magnitude = buffer[src_idx].norm();
+
+            let smoothed = if alpha > 0.0 {
+                let s = alpha * self.prev[i] + inv_alpha * magnitude;
+                self.prev[i] = s;
+                s
+            } else {
+                magnitude
+            };
+
             // log10(0) = -inf を避けるため、小さな値で下限を設ける
-            // -100 dB (10^-10) 相当をフロアとする
-            let magnitude = result[i].max(1e-10);
-            result[i] = magnitude.log10() * 10.0;
+            result[i] = smoothed.max(1e-10).log10() * 10.0;
         }
     }
 }
@@ -197,7 +199,6 @@ mod tests {
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        // DC 成分: 全て同じ値の入力
         let mut input = vec![0i8; n * 2]; // Complex<i8> なので n * 2
         for i in 0..n {
             input[i * 2] = 64; // 宽数 = 64
@@ -205,7 +206,7 @@ mod tests {
         }
 
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 結果は DC中心に並べ替えられるため、DC成分は中央（half_n）に来る
         let half_n = n / 2;
@@ -224,10 +225,10 @@ mod tests {
         let window = ones_window(n);
         let mut fft = FFT::new(n, &window);
 
-        let mut input = vec![0i8; n * 2]; // 全て0
+        let input = vec![0i8; n * 2]; // 全て0
 
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 全ての結果が finite であるべき（inf, -inf, NaN でない）
         for (i, &val) in result.iter().enumerate() {
@@ -249,7 +250,6 @@ mod tests {
         let mut fft = FFT::new(n, &window);
         fft.set_smoothing_time_constant(0.5);
 
-        // DC入力（全て同じ値）
         let mut input = vec![0i8; n * 2];
         for i in 0..n {
             input[i * 2] = 64; // 宽数 = 64
@@ -257,10 +257,10 @@ mod tests {
         }
 
         let mut result1 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result1);
+        fft.fft(&input, &mut result1);
 
         let mut result2 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result2);
+        fft.fft(&input, &mut result2);
 
         // スムージング適用時、2回目の結果は1回目の結果と異なるはず
         // （prevが0でない値を持っているため）
@@ -295,10 +295,10 @@ mod tests {
         }
 
         let mut result1 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result1);
+        fft.fft(&input, &mut result1);
 
         let mut result2 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result2);
+        fft.fft(&input, &mut result2);
 
         // スムージング無効時、同じ入力 → 同じ出力
         for i in 0..n {
@@ -331,10 +331,10 @@ mod tests {
         }
 
         let mut result1 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result1);
+        fft.fft(&input, &mut result1);
 
         let mut result2 = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result2);
+        fft.fft(&input, &mut result2);
 
         // α=1.0 のとき、result2 は result1 と同じはず（prevを完全に維持）
         for i in 0..n {
@@ -352,13 +352,13 @@ mod tests {
         fft.set_smoothing_time_constant(-0.5);
         let mut result = vec![0.0f32; n];
         // クラッシュしなければ OK
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 1.0より大きい値: 振動するがクラッシュしてはいけない
         let mut fft = FFT::new(n, &window);
         fft.set_smoothing_time_constant(1.5);
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
     }
 
     #[test]
@@ -376,7 +376,7 @@ mod tests {
         }
 
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 理論値の計算:
         // 入力: 64/128 = 0.5
@@ -417,7 +417,7 @@ mod tests {
         }
 
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 全て finite であるべき
         for (i, &val) in result.iter().enumerate() {
@@ -447,7 +447,7 @@ mod tests {
             }
 
             let mut result = vec![0.0f32; n];
-            fft.fft(&mut input, &mut result);
+            fft.fft(&input, &mut result);
 
             // クラッシュせず、全て finite であるべき
             for (i, &r) in result.iter().enumerate() {
@@ -497,6 +497,82 @@ mod tests {
         let window = vec![1.0; n];
         let _fft = FFT::new(n, &window);
     }
+
+    #[test]
+    fn test_fft_differential_against_reference() {
+        // 参照実装（愚直な実装）と最適化版の結果を比較する
+        let n = 16;
+        let mut window = vec![0.0f32; n];
+        for (i, w) in window.iter_mut().enumerate() {
+             // Hann 窓的なものを生成
+             *w = 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (n - 1) as f32).cos());
+        }
+        
+        let mut fft = FFT::new(n, &window);
+        fft.set_smoothing_time_constant(0.3);
+        
+        let mut input = vec![0i8; n * 2];
+        for i in 0..n {
+            input[i*2] = (i as i8).wrapping_sub(8).wrapping_mul(10);
+            input[i*2+1] = (7i8).wrapping_sub(i as i8).wrapping_mul(10);
+        }
+        
+        // 1回目の実行（prevを0から更新）
+        let mut result_opt = vec![0.0f32; n];
+        fft.fft(&input, &mut result_opt);
+        
+        // 参照計算（1回目）
+        let mut prev = vec![0.0f32; n]; // 初期状態
+        let expected = calculate_reference_fft(n, &window, &input, &mut prev, 0.3);
+        
+        for i in 0..n {
+            assert!((result_opt[i] - expected[i]).abs() < 1e-5, "Mismatch at index {} on 1st run: opt={}, expected={}", i, result_opt[i], expected[i]);
+        }
+        
+        // 2回目の実行（Smoothingの効果を確認）
+        fft.fft(&input, &mut result_opt);
+        let expected2 = calculate_reference_fft(n, &window, &input, &mut prev, 0.3);
+        
+        for i in 0..n {
+            assert!((result_opt[i] - expected2[i]).abs() < 1e-5, "Mismatch at index {} on 2nd run: opt={}, expected={}", i, result_opt[i], expected2[i]);
+        }
+    }
+
+    /// 参照用の愚直な計算（効率は無視）
+    fn calculate_reference_fft(n: usize, window: &[f32], input: &[i8], prev: &mut [f32], alpha: f32) -> Vec<f32> {
+        use rustfft::num_complex::Complex;
+        let mut buffer = vec![Complex { re: 0.0, im: 0.0 }; n];
+        for i in 0..n {
+            buffer[i] = Complex {
+                re: input[i*2] as f32 / 128.0,
+                im: input[i*2+1] as f32 / 128.0,
+            } * window[i];
+        }
+        
+        let mut planner = FftPlanner::new();
+        let fft = planner.plan_fft_forward(n);
+        fft.process(&mut buffer);
+        
+        let half_n = n / 2;
+        let mut shifted = vec![0.0f32; n];
+        for i in 0..half_n {
+            shifted[i + half_n] = buffer[i].norm() / n as f32;
+            shifted[i] = buffer[i + half_n].norm() / n as f32;
+        }
+        
+        let mut res = vec![0.0f32; n];
+        for i in 0..n {
+            let magnitude = if alpha > 0.0 {
+                let s = alpha * prev[i] + (1.0 - alpha) * shifted[i];
+                prev[i] = s;
+                s
+            } else {
+                shifted[i]
+            };
+            res[i] = magnitude.max(1e-10).log10() * 10.0;
+        }
+        res
+    }
 }
 
 // ============================================================================
@@ -527,7 +603,7 @@ mod wasm_tests {
         }
 
         let mut result = vec![0.0f32; n];
-        fft.fft(&mut input, &mut result);
+        fft.fft(&input, &mut result);
 
         // 結果のサイズが正しいことを確認
         assert_eq!(result.len(), n);

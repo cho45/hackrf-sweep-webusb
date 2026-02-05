@@ -19,7 +19,8 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSI
 */
 
 /* Base */
-html, body {
+html,
+body {
 	margin: 0;
 	padding: 0;
 	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
@@ -93,6 +94,24 @@ html, body {
 	background: #616161;
 }
 
+.btn-tiny {
+	padding: 4px 8px;
+	font-size: 10px;
+	margin: 0;
+}
+
+.btn-reset-peak {
+	position: absolute;
+	top: 8px;
+	right: 8px;
+	background: rgba(121, 85, 72, 0.8);
+	z-index: 10;
+}
+
+.btn-reset-peak:hover {
+	background: rgba(121, 85, 72, 1);
+}
+
 /* Form */
 .form {
 	margin-top: 16px;
@@ -140,6 +159,16 @@ html, body {
 .field-input input:disabled,
 .field-input select:disabled {
 	opacity: 0.5;
+}
+
+.field-input .field-range {
+	flex: 2;
+	margin-right: 8px;
+	padding: 0;
+}
+
+.field-input .field-number {
+	flex: 1;
 }
 
 .field-suffix {
@@ -205,9 +234,12 @@ html, body {
 
 /* Snackbar (toast) */
 @keyframes snackbar-fade {
-	0%, 80% {
+
+	0%,
+	80% {
 		opacity: 1;
 	}
+
 	100% {
 		opacity: 0;
 	}
@@ -348,7 +380,15 @@ dialog .dialog-footer {
 	color: #fff;
 	border-left: 2px solid #f33;
 	padding: 0 4px;
-	background: rgba(0,0,0,0.5);
+	background: rgba(0, 0, 0, 0.5);
+	white-space: nowrap;
+	pointer-events: none;
+}
+
+.axis.is-reversed {
+	border-left: none;
+	border-right: 2px solid #f33;
+	transform: translateX(-100%);
 }
 
 .axis.right {

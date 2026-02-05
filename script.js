@@ -4,11 +4,11 @@ Copyright (c) 2019, cho45 <cho45@lowreal.net>
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without modification, are permitted provided that the following conditions are met:
-    Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
-    Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the 
-    documentation and/or other materials provided with the distribution.
-    Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
-    without specific prior written permission.
+	Redistributions of source code must retain the above copyright notice, this list of conditions and the following disclaimer.
+	Redistributions in binary form must reproduce the above copyright notice, this list of conditions and the following disclaimer in the 
+	documentation and/or other materials provided with the distribution.
+	Neither the name of Great Scott Gadgets nor the names of its contributors may be used to endorse or promote products derived from this software
+	without specific prior written permission.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, 
 THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
@@ -49,9 +49,10 @@ createApp({
 				ampEnabled: false,
 				antennaEnabled: false,
 				lnaGain: 16,
-				vgaGain: 16
+				vgaGain: 16,
+				peakHold: false
 			},
-			info : {
+			info: {
 				serialNumber: "",
 				boardId: "",
 				boardName: "",
@@ -126,15 +127,15 @@ createApp({
 	},
 
 	methods: {
-		openAbout: function() {
+		openAbout: function () {
 			this.$refs.aboutDialog.showModal();
 		},
 
-		closeAbout: function() {
+		closeAbout: function () {
 			this.$refs.aboutDialog.close();
 		},
 
-		applyPreset: function() {
+		applyPreset: function () {
 			if (this.selectedPreset) {
 				const preset = this.presets.find(p => p.name === this.selectedPreset);
 				if (preset) {
@@ -142,8 +143,13 @@ createApp({
 					this.range.stop = preset.stop;
 					// FFTサイズは最大値に設定（startメソッド側で画面サイズに応じて制限される）
 					this.range.fftSize = 8192;
+					this.resetPeak();
 				}
 			}
+		},
+
+		resetPeak: function () {
+			this.maxData = null;
 		},
 		connect: async function () {
 			if (!this.backend) {
@@ -159,7 +165,9 @@ createApp({
 			try {
 				ok = await this.backend.open()
 			} catch (e) {
-				alert(e);
+				this.alert.title = "Error";
+				this.alert.content = e.message || e.toString();
+				this.alert.show = true;
 			}
 
 			if (!ok) {
@@ -183,11 +191,11 @@ createApp({
 			this.connected = true;
 			const { boardId, versionString, apiVersion, partId, serialNo } = await this.backend.info();
 
-			this.info.serialNumber = serialNo.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join('');
+			this.info.serialNumber = serialNo.map((i) => (i + 0x100000000).toString(16).slice(1)).join('');
 			this.info.boardId = boardId;
 			this.info.boardName = HackRF.BOARD_ID_NAME.get(boardId);
 			this.info.firmwareVersion = `${versionString} (API:${apiVersion[0]}.${apiVersion[1]}${apiVersion[2]})`;
-			this.info.partIdNumber = partId.map( (i) => (i + 0x100000000).toString(16).slice(1) ).join(' ');
+			this.info.partIdNumber = partId.map((i) => (i + 0x100000000).toString(16).slice(1)).join(' ');
 			this.snackbar.message = `connected to ${HackRF.BOARD_ID_NAME.get(this.info.boardId)}`;
 			console.log('apply options', this.options);
 			await this.backend.setAmpEnable(this.options.ampEnabled);
@@ -214,7 +222,7 @@ createApp({
 			const lowFreq = +this.range.start;
 			const highFreq0 = +this.range.stop;
 			const bandwidth0 = highFreq0 - lowFreq;
-			const steps = Math.ceil((bandwidth0*1e6) / SAMPLE_RATE);
+			const steps = Math.ceil((bandwidth0 * 1e6) / SAMPLE_RATE);
 			const bandwidth = (steps * SAMPLE_RATE) / 1e6;
 			const highFreq = lowFreq + bandwidth;
 			this.range.stop = highFreq;
@@ -223,10 +231,10 @@ createApp({
 			// const freqBinCount = (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
 			//
 			const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
-			const fftSize0 = Math.pow(2, Math.ceil(Math.log2((freqBinCount0 * SAMPLE_RATE ) / (bandwidth*1e6))));
+			const fftSize0 = Math.pow(2, Math.ceil(Math.log2((freqBinCount0 * SAMPLE_RATE) / (bandwidth * 1e6))));
 			const fftSize1 = fftSize0 < +this.range.fftSize ? fftSize0 : +this.range.fftSize;
 			const FFT_SIZE = fftSize1 > 8 ? fftSize1 : 8;
-			const freqBinCount =  (bandwidth*1e6) / SAMPLE_RATE * FFT_SIZE;
+			const freqBinCount = (bandwidth * 1e6) / SAMPLE_RATE * FFT_SIZE;
 
 			if (this.range.fftSize != FFT_SIZE) {
 				this.snackbar.show = true;
@@ -235,24 +243,24 @@ createApp({
 			}
 
 
-			console.log({lowFreq, highFreq, bandwidth, freqBinCount});
+			console.log({ lowFreq, highFreq, bandwidth, freqBinCount });
 			const nx = Math.pow(2, Math.ceil(Math.log2(freqBinCount)));
 			const maxTextureSize = 16384;
 			const useWebGL = nx <= maxTextureSize;
 			console.log(`Waterfall: ${useWebGL ? 'WebGL (WaterfallGL)' : 'Canvas 2D (Waterfall)'} - nx=${nx}, maxTextureSize=${maxTextureSize}`);
 			const waterfall = useWebGL ?
-				new WaterfallGL(canvasWf, freqBinCount, 256):
+				new WaterfallGL(canvasWf, freqBinCount, 256) :
 				new Waterfall(canvasWf, freqBinCount, 256);
 
 			canvasFft.height = 200;
-			canvasFft.width  = freqBinCount;
+			canvasFft.width = freqBinCount;
 
 			const ctxFft = canvasFft.getContext('2d');
 
-			let prevData = null;
+			this.maxData = null;
 			await this.backend.start({ FFT_SIZE, SAMPLE_RATE, lowFreq, highFreq, bandwidth, freqBinCount }, Comlink.proxy((data, metrics) => {
 				this.metrics = metrics;
-				requestAnimationFrame( () => {
+				requestAnimationFrame(() => {
 					/*
 					const max = Math.max(...data);
 					const min = Math.min(...data);
@@ -272,12 +280,47 @@ createApp({
 
 					ctxFft.fillStyle = "rgba(0, 0, 0, 0.1)";
 					ctxFft.fillRect(0, 0, canvasFft.width, canvasFft.height);
+
+					// Draw grid
+					ctxFft.strokeStyle = "rgba(255, 255, 255, 0.1)";
+					ctxFft.lineWidth = 1;
+					ctxFft.beginPath();
+					for (let p of [0.25, 0.5, 0.75]) {
+						ctxFft.moveTo(canvasFft.width * p, 0);
+						ctxFft.lineTo(canvasFft.width * p, canvasFft.height);
+					}
+					ctxFft.stroke();
+
+					if (this.options.peakHold) {
+						const now = Date.now();
+						if (now - this.captureStartTime > 1000) {
+							if (!this.maxData || this.maxData.length !== data.length) {
+								this.maxData = new Float32Array(data);
+							} else {
+								for (let i = 0; i < data.length; i++) {
+									if (data[i] > this.maxData[i]) this.maxData[i] = data[i];
+								}
+							}
+						}
+
+						if (this.maxData) {
+							ctxFft.beginPath();
+							ctxFft.moveTo(0, canvasFft.height);
+							for (let i = 0; i < freqBinCount; i++) {
+								const n = (this.maxData[i] + 45) / 42;
+								ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n);
+							}
+							ctxFft.strokeStyle = "#ffeb3b";
+							ctxFft.stroke();
+						}
+					}
+
 					ctxFft.save();
 					ctxFft.beginPath();
 					ctxFft.moveTo(0, canvasFft.height);
 					for (let i = 0; i < freqBinCount; i++) {
 						const n = (data[i] + 45) / 42;
-						ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n );
+						ctxFft.lineTo(i, canvasFft.height - canvasFft.height * n);
 					}
 					ctxFft.strokeStyle = "#fff";
 					ctxFft.stroke();
@@ -286,6 +329,7 @@ createApp({
 			}));
 
 			this.running = true;
+			this.captureStartTime = Date.now();
 		},
 
 		stop: async function () {
@@ -315,8 +359,8 @@ createApp({
 				const json = localStorage.getItem('hackrf-sweep-setting');
 				// console.log('loadSetting', json);
 				const setting = JSON.parse(json);
-				this.range = setting.range;
-				this.options = setting.options;
+				Object.assign(this.range, setting.range);
+				Object.assign(this.options, setting.options);
 			} catch (e) {
 				console.log(e);
 			}
@@ -352,6 +396,10 @@ createApp({
 			await this.backend.setVgaGain(+val);
 		});
 
+		this.$watch('options.peakHold', () => {
+			this.resetPeak();
+		});
+
 		this.$watch('range', () => {
 			// 手動で周波数を変更したらプリセット選択をクリア
 			if (this.selectedPreset) {
@@ -377,6 +425,7 @@ createApp({
 			const label = this.labelFor(p);
 			this.currentHover = label;
 			this.$refs.currentHover.style.left = (p * 100) + "%";
+			this.$refs.currentHover.classList.toggle('is-reversed', p > 0.5);
 		};
 
 		const leaveListener = (e) => {

@@ -1,6 +1,5 @@
 {
   "name": "hackrf-web",
-  "type": "module",
   "collaborators": [
     "cho45 <cho45@lowreal.net>"
   ],
@@ -10,7 +9,7 @@
     "hackrf_web.js",
     "hackrf_web.d.ts"
   ],
-  "main": "hackrf_web.js",
+  "module": "hackrf_web.js",
   "types": "hackrf_web.d.ts",
   "sideEffects": [
     "./snippets/*"

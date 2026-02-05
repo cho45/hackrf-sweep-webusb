@@ -2,7 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const __wbg_fft_free: (a: number, b: number) => void;
-export const fft_fft: (a: number, b: number, c: number, d: any, e: number, f: number, g: any) => void;
+export const fft_fft: (a: number, b: number, c: number, d: number, e: number, f: any) => void;
 export const fft_new: (a: number, b: number, c: number) => number;
 export const fft_set_smoothing_time_constant: (a: number, b: number) => void;
 export const set_panic_hook: () => void;

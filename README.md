@@ -2,7 +2,8 @@
 
 This is a spectrum analyzer implementation in JavaScript with WebUSB for <a href="https://greatscottgadgets.com/hackrf/">HackRF</a>.
 
-<img src="./doc/dfe049fbba1adc9c9e0e21e2449f72cd.gif">
+https://github.com/user-attachments/assets/f347f146-637a-4bad-b028-960627e35685
+
 
 # Usage
 
