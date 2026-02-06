@@ -4,8 +4,6 @@ This is a spectrum analyzer implementation in JavaScript with WebUSB for <a href
 
 <img src="./doc/screenshot.avif">
 
-https://github.com/user-attachments/assets/f347f146-637a-4bad-b028-960627e35685
-
 
 # Usage
 
