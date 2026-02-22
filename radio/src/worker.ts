@@ -67,13 +67,31 @@ class RadioBackend {
 	}
 
 	async startRx(
-		options: { sampleRate: number; centerFreq: number; targetFreq: number; decimationFactor: number; outputSampleRate: number; fftSize: number },
+		options: {
+			sampleRate: number;
+			centerFreq: number;
+			targetFreq: number;
+			decimationFactor: number;
+			outputSampleRate: number;
+			fftSize: number;
+			ifMinHz: number;
+			ifMaxHz: number;
+		},
 		onData: (audioOut: Float32Array, fftOut: Float32Array) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 
 		// Rust Wasm側のReceiverインスタンスを作成
-		this.receiver = new Receiver(options.sampleRate, options.centerFreq, options.targetFreq, options.decimationFactor, options.outputSampleRate, options.fftSize);
+		this.receiver = new Receiver(
+			options.sampleRate,
+			options.centerFreq,
+			options.targetFreq,
+			options.decimationFactor,
+			options.outputSampleRate,
+			options.fftSize,
+			options.ifMinHz,
+			options.ifMaxHz
+		);
 
 		// デバイス側にサンプリングレートおよび周波数を設定
 		await this.device.setSampleRateManual(options.sampleRate, 1);
@@ -108,6 +126,12 @@ class RadioBackend {
 	async setTargetFreq(centerFreq: number, targetFreq: number) {
 		if (this.receiver) {
 			this.receiver.set_target_freq(centerFreq, targetFreq);
+		}
+	}
+
+	async setIfBand(minHz: number, maxHz: number) {
+		if (this.receiver) {
+			this.receiver.set_if_band(minHz, maxHz);
 		}
 	}
 }

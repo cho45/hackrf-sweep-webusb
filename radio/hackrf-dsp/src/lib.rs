@@ -24,6 +24,9 @@ extern "C" {
 #[wasm_bindgen]
 pub struct Receiver {
     sample_rate: f32,
+    decimated_sample_rate: f32,
+    if_min_hz: f32,
+    if_max_hz: f32,
     nco: Nco,
     filter: DecimationFilter,
     am_demod: AMDemodulator,
@@ -37,6 +40,26 @@ pub struct Receiver {
     fft_buffer: Vec<f32>,
 }
 
+fn sanitize_if_band(min_hz: f32, max_hz: f32, decimated_sample_rate: f32) -> (f32, f32) {
+    let max_allowed = (decimated_sample_rate * 0.49).max(200.0);
+    let mut min = min_hz.max(0.0);
+    let mut max = max_hz.max(0.0);
+
+    if min >= max_allowed {
+        min = 0.0;
+    }
+    if max <= min {
+        max = min + 100.0;
+    }
+    max = max.min(max_allowed);
+    if max <= min {
+        min = 0.0;
+        max = max_allowed.min(4_500.0);
+    }
+
+    (min, max)
+}
+
 #[wasm_bindgen]
 impl Receiver {
     #[wasm_bindgen(constructor)]
@@ -47,6 +70,8 @@ impl Receiver {
         decimation_factor: usize,
         output_sample_rate: f32,
         fft_size: usize,
+        if_min_hz: f32,
+        if_max_hz: f32,
     ) -> Self {
         console_error_panic_hook::set_once();
 
@@ -54,11 +79,11 @@ impl Receiver {
 
         let offset_hz = target_freq - center_freq;
         let decimated_sample_rate = sample_rate / decimation_factor as f32;
+        let (if_min_hz, if_max_hz) = sanitize_if_band(if_min_hz, if_max_hz, decimated_sample_rate);
 
-        // 複素周波数変換後の選局LPF（AM音声帯域を想定）。
-        // 隣接チャネル漏れを抑えるためやや狭めのカットオフにする。
-        let cutoff_hz = 4_500.0_f32.min(decimated_sample_rate * 0.45);
-        let cutoff_norm = cutoff_hz / sample_rate;
+        // 複素周波数変換後の IF チャンネルフィルタ（BPF = LPF(max) - LPF(min)）
+        let min_cutoff_norm = if_min_hz / sample_rate;
+        let max_cutoff_norm = if_max_hz / sample_rate;
 
         let resampler = Resampler::new(
             decimated_sample_rate.round() as u32,
@@ -79,8 +104,11 @@ impl Receiver {
 
         Self {
             sample_rate,
+            decimated_sample_rate,
+            if_min_hz,
+            if_max_hz,
             nco: Nco::new(-offset_hz, sample_rate),
-            filter: DecimationFilter::new_fir(decimation_factor, 601, cutoff_norm),
+            filter: DecimationFilter::new_fir_band(decimation_factor, 601, min_cutoff_norm, max_cutoff_norm),
             am_demod: AMDemodulator::new(),
             resampler,
             fft: FFT::new(fft_size, &window),
@@ -95,6 +123,15 @@ impl Receiver {
     pub fn set_target_freq(&mut self, center_freq: f32, target_freq: f32) {
         let offset_hz = target_freq - center_freq;
         self.nco = Nco::new(-offset_hz, self.sample_rate);
+    }
+
+    /// IFチャンネルフィルタの通過帯域を変更する（Hz）
+    pub fn set_if_band(&mut self, min_hz: f32, max_hz: f32) {
+        let (min_hz, max_hz) = sanitize_if_band(min_hz, max_hz, self.decimated_sample_rate);
+        self.if_min_hz = min_hz;
+        self.if_max_hz = max_hz;
+        self.filter
+            .set_fir_bandpass(self.if_min_hz / self.sample_rate, self.if_max_hz / self.sample_rate);
     }
 
     /// 1ブロックのIQデータ(i8型)を受け取り、オーディオ信号とFFT結果を返す。

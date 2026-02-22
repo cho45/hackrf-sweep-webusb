@@ -1,5 +1,56 @@
 use num_complex::Complex;
 
+fn design_lowpass_coeffs(num_taps: usize, cutoff_norm: f32) -> Vec<f32> {
+    assert!(num_taps > 0, "num_taps must be > 0");
+    assert!(
+        cutoff_norm > 0.0 && cutoff_norm < 0.5,
+        "Invalid cutoff_norm={}",
+        cutoff_norm
+    );
+    let mut coeffs = vec![0.0; num_taps];
+    let center = (num_taps - 1) as f32 / 2.0;
+    let alpha = 0.54;
+    let beta = 0.46;
+
+    for (i, coeff) in coeffs.iter_mut().enumerate() {
+        let n = i as f32 - center;
+        let sinc = if n == 0.0 {
+            2.0 * cutoff_norm
+        } else {
+            (2.0 * std::f32::consts::PI * cutoff_norm * n).sin() / (std::f32::consts::PI * n)
+        };
+        let window =
+            alpha - beta * (2.0 * std::f32::consts::PI * i as f32 / (num_taps - 1) as f32).cos();
+        *coeff = sinc * window;
+    }
+
+    // LPFはDCゲイン1に正規化
+    let gain = coeffs.iter().sum::<f32>().max(1e-8);
+    for c in &mut coeffs {
+        *c /= gain;
+    }
+
+    coeffs
+}
+
+fn design_bandpass_coeffs(num_taps: usize, min_norm: f32, max_norm: f32) -> Vec<f32> {
+    assert!(num_taps > 0, "num_taps must be > 0");
+    assert!(
+        min_norm >= 0.0 && max_norm > min_norm && max_norm < 0.5,
+        "Invalid band edges: min_norm={}, max_norm={}",
+        min_norm,
+        max_norm
+    );
+
+    if min_norm == 0.0 {
+        return design_lowpass_coeffs(num_taps, max_norm);
+    }
+
+    let high = design_lowpass_coeffs(num_taps, max_norm);
+    let low = design_lowpass_coeffs(num_taps, min_norm);
+    high.iter().zip(low.iter()).map(|(h, l)| h - l).collect()
+}
+
 /// 複素ベースバンド用デシメーションフィルタ (簡単なCICやFIR)
 /// HackRF（例えば2MHz）から音声レート（たとえば48kHzなど）へとサンプリングレートを落とす。
 /// レート変換比（Decimation factor） M とします。
@@ -26,32 +77,19 @@ impl DecimationFilter {
     }
 
     /// より良い遮断特性を持つFIRフィルタを用いたデシメーター
+    #[allow(dead_code)]
     pub fn new_fir(factor: usize, num_taps: usize, cutoff_norm: f32) -> Self {
-        let mut coeffs = vec![0.0; num_taps];
-        // Sinc + Hamming window によるローパスフィルタ設計
-        let mut sum = 0.0;
-        let alpha = 0.54;
-        let beta = 0.46;
-        let center = (num_taps - 1) as f32 / 2.0;
+        Self::new_fir_band(factor, num_taps, 0.0, cutoff_norm)
+    }
 
-        for (i, coeff) in coeffs.iter_mut().enumerate() {
-            let n = i as f32 - center;
-            // ideal Sinc
-            let sinc = if n == 0.0 {
-                2.0 * cutoff_norm
-            } else {
-                (2.0 * std::f32::consts::PI * cutoff_norm * n).sin() / (std::f32::consts::PI * n)
-            };
-            // Hamming window
-            let window = alpha - beta * (2.0 * std::f32::consts::PI * i as f32 / (num_taps - 1) as f32).cos();
-            *coeff = sinc * window;
-            sum += *coeff;
-        }
-
-        // ゲインを1に正規化
-        for c in &mut coeffs {
-            *c /= sum;
-        }
+    /// FIRバンドパス（LPF(max) - LPF(min)）を用いたデシメーター
+    pub fn new_fir_band(
+        factor: usize,
+        num_taps: usize,
+        min_cutoff_norm: f32,
+        max_cutoff_norm: f32,
+    ) -> Self {
+        let coeffs = design_bandpass_coeffs(num_taps, min_cutoff_norm, max_cutoff_norm);
 
         Self {
             factor,
@@ -59,6 +97,11 @@ impl DecimationFilter {
             history: vec![Complex::new(0.0, 0.0); num_taps - 1],
             coeffs,
         }
+    }
+
+    /// 既存FIR係数を band-pass へ更新する（タップ数は維持）
+    pub fn set_fir_bandpass(&mut self, min_cutoff_norm: f32, max_cutoff_norm: f32) {
+        self.coeffs = design_bandpass_coeffs(self.coeffs.len(), min_cutoff_norm, max_cutoff_norm);
     }
 
     /// ブロック単位でのフィルタリングとデシメーション
@@ -289,5 +332,24 @@ mod tests {
             pass_power,
             adj_power
         );
+    }
+
+    #[test]
+    fn test_fir_bandpass_rejects_dc() {
+        let sample_rate = 2_000_000.0;
+        let factor = 40;
+        let mut flt = DecimationFilter::new_fir_band(
+            factor,
+            601,
+            500.0 / sample_rate,
+            5_000.0 / sample_rate,
+        );
+
+        let len = 200_000;
+        let input: Vec<Complex<f32>> = (0..len).map(|_| Complex::new(1.0, 0.0)).collect();
+        let out = flt.process(&input);
+        let skip = 50usize.min(out.len().saturating_sub(1));
+        let dc_power = out[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>() / (out.len() - skip) as f32;
+        assert!(dc_power < 1e-3, "Band-pass should reject DC, got dc_power={}", dc_power);
     }
 }

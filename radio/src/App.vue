@@ -21,6 +21,21 @@
           <div class="caption">NCO Offset: {{ (ncoOffset / 1000).toFixed(1) }} kHz</div>
         </div>
 
+        <div class="field">
+          <label>IF Min (Hz)</label>
+          <div class="field-input">
+            <input type="number" min="0" step="100" v-model.number="ifMinHz" @change="onIfBandChange" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>IF Max (Hz)</label>
+          <div class="field-input">
+            <input type="number" min="1" step="100" v-model.number="ifMaxHz" @change="onIfBandChange" />
+          </div>
+        </div>
+        <div class="caption">AM包絡線検波では通常 IF Min = 0 Hz</div>
+
         <div class="divider"></div>
 
         <div class="field">
@@ -96,6 +111,9 @@ const info = reactive({ boardName: '', firmwareVersion: '' });
 const sampleRate = 2_000_000; // 2MHz
 const decimationFactor = 40;  // 2MHz / 40 = 50kHz オーディオレート
 const targetFreq = ref(1_025_000); // デフォルト 1025kHz に設定
+const usableBandwidthRatio = 0.75; // HackRFのBBフィルタ想定帯域（表示上の有効域）
+const ifMinHz = ref(0);
+const ifMaxHz = ref(4_500);
 
 // NCOのオフセットを計算 (下限制御のために centerFreq を sampleRate/2 以上に保つ)
 const minCenterFreq = sampleRate / 2; // 1,000,000 Hz 
@@ -147,6 +165,17 @@ const onFreqChange = async () => {
     // ハードウェア(HackRFのLO)の再チューニングを同時に実行する
     await backend.setFreq(centerFreq.value);
     await backend.setTargetFreq(centerFreq.value, targetFreq.value);
+  }
+};
+
+const onIfBandChange = async () => {
+  if (ifMinHz.value < 0) ifMinHz.value = 0;
+  if (ifMaxHz.value <= ifMinHz.value) {
+    ifMaxHz.value = ifMinHz.value + 100;
+  }
+
+  if (backend && running.value) {
+    await backend.setIfBand(ifMinHz.value, ifMaxHz.value);
   }
 };
 
@@ -262,6 +291,11 @@ const start = async () => {
   let fftSize = Math.pow(2, Math.ceil(Math.log2(freqBinCount0)));
   if (fftSize < 256) fftSize = 256;
   if (fftSize > 8192) fftSize = 8192; // 上限
+  const usableBins = Math.max(1, Math.floor(fftSize * usableBandwidthRatio));
+  const edgeBins = Math.max(0, Math.floor((fftSize - usableBins) / 2));
+  const usableStartBin = edgeBins;
+  const usableEndBin = fftSize - edgeBins - 1;
+  const maskedFftOut = new Float32Array(fftSize);
 
   // キャンバスの内部解像度を FFT の bin 数に合わせる
   canvasFft.width = fftSize;
@@ -278,7 +312,11 @@ const start = async () => {
   const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array) => {
     playAudioBuffer(audioOut);
     if (waterfall) {
-      waterfall.renderLine(fftOut);
+      for (let i = 0; i < fftSize; i++) {
+        const inUsableBand = i >= usableStartBin && i <= usableEndBin;
+        maskedFftOut[i] = inUsableBand ? (fftOut[i] ?? -120) : -120;
+      }
+      waterfall.renderLine(maskedFftOut);
 
       // FFT表示
       canvasFftCtx.clearRect(0, 0, canvasFft.width, canvasFft.height);
@@ -286,13 +324,29 @@ const start = async () => {
       canvasFftCtx.beginPath();
       canvasFftCtx.moveTo(0, canvasFft.height);
       for (let i = 0; i < fftSize; i++) {
-        // fftOut は長さ n の Float32Array であり、i < fftSize の範囲内なので安全
-        const val = fftOut[i] !== undefined ? fftOut[i]! : -100;
+        // 有効帯域外は表示上マスク済み
+        const val = maskedFftOut[i] !== undefined ? maskedFftOut[i]! : -120;
         const n = (val + 45) / 42; // Adjust for visualization range
         canvasFftCtx.lineTo(i, canvasFft.height - canvasFft.height * n);
       }
       canvasFftCtx.strokeStyle = "#fff";
       canvasFftCtx.stroke();
+
+      // 有効帯域外を薄く塗って、無効領域を明示
+      if (edgeBins > 0) {
+        canvasFftCtx.fillStyle = "rgba(0, 0, 0, 0.45)";
+        canvasFftCtx.fillRect(0, 0, usableStartBin, canvasFft.height);
+        canvasFftCtx.fillRect(usableEndBin + 1, 0, fftSize - usableEndBin - 1, canvasFft.height);
+
+        canvasFftCtx.beginPath();
+        canvasFftCtx.moveTo(usableStartBin, 0);
+        canvasFftCtx.lineTo(usableStartBin, canvasFft.height);
+        canvasFftCtx.moveTo(usableEndBin, 0);
+        canvasFftCtx.lineTo(usableEndBin, canvasFft.height);
+        canvasFftCtx.strokeStyle = "rgba(80, 200, 255, 0.7)";
+        canvasFftCtx.lineWidth = 1;
+        canvasFftCtx.stroke();
+      }
 
       // targetFreq (NCOオフセット位置) に赤い線を引く
       // freqBinCount と同じく、キャンバスの幅 = サンプリングレート(2MHz) の帯域幅
@@ -322,6 +376,8 @@ const start = async () => {
     decimationFactor,
     outputSampleRate: audioCtx!.sampleRate, // Use actual audio context sample rate
     fftSize,
+    ifMinHz: ifMinHz.value,
+    ifMaxHz: ifMaxHz.value,
   }, onData);
 
   running.value = true;
