@@ -74,9 +74,13 @@ class RadioBackend {
 			decimationFactor: number;
 			outputSampleRate: number;
 			fftSize: number;
-			ifMinHz: number;
-			ifMaxHz: number;
-		},
+				fftVisibleStartBin: number;
+				fftVisibleBins: number;
+				ifMinHz: number;
+				ifMaxHz: number;
+				dcCancelEnabled: boolean;
+				fftUseProcessed: boolean;
+			},
 		onData: (audioOut: Float32Array, fftOut: Float32Array) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
@@ -89,8 +93,12 @@ class RadioBackend {
 			options.decimationFactor,
 			options.outputSampleRate,
 			options.fftSize,
+			options.fftVisibleStartBin,
+			options.fftVisibleBins,
 			options.ifMinHz,
-			options.ifMaxHz
+			options.ifMaxHz,
+			options.dcCancelEnabled,
+			options.fftUseProcessed
 		);
 
 		// デバイス側にサンプリングレートおよび周波数を設定
@@ -132,6 +140,18 @@ class RadioBackend {
 	async setIfBand(minHz: number, maxHz: number) {
 		if (this.receiver) {
 			this.receiver.set_if_band(minHz, maxHz);
+		}
+	}
+
+	async setDcCancelEnabled(enabled: boolean) {
+		if (this.receiver) {
+			this.receiver.set_dc_cancel_enabled(enabled);
+		}
+	}
+
+	async setFftUseProcessed(enabled: boolean) {
+		if (this.receiver) {
+			this.receiver.set_fft_use_processed(enabled);
 		}
 	}
 }

@@ -14,9 +14,27 @@
 
       <div class="form">
         <div class="field">
+          <label>View Center Frequency (kHz)</label>
+          <div class="field-input">
+            <input type="number" min="1000" step="1" v-model.number="viewCenterFreqKHz" @change="onViewRangeChange" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label>View Bandwidth (kHz)</label>
+          <div class="field-input">
+            <input type="number" min="100" step="10" v-model.number="viewBandwidthKHz" @change="onViewRangeChange" />
+          </div>
+          <div class="caption">
+            Rx SampleRate: {{ (rxSampleRate / 1_000_000).toFixed(2) }} Msps / Visible: {{ (viewBandwidthHz / 1_000_000).toFixed(3) }} MHz<br>
+            RF Center: {{ formatFreq(rfCenterFreq) }} / Target-IF Offset: {{ (ncoOffset / 1000).toFixed(1) }} kHz
+          </div>
+        </div>
+
+        <div class="field">
           <label>Target Frequency (kHz)</label>
           <div class="field-input">
-            <input type="number" v-model.number="targetFreqKHz" @change="onFreqChange" />
+            <input type="number" min="1000" step="1" v-model.number="targetFreqKHz" @change="onTargetFreqChange" />
           </div>
           <div class="caption">NCO Offset: {{ (ncoOffset / 1000).toFixed(1) }} kHz</div>
         </div>
@@ -63,6 +81,12 @@
         <label class="checkbox">
           <input type="checkbox" v-model="options.antennaEnabled"> Antenna Port Power
         </label>
+        <label class="checkbox">
+          <input type="checkbox" v-model="dcCancelEnabled"> IQ DC Cancel
+        </label>
+        <label class="checkbox">
+          <input type="checkbox" v-model="fftUseProcessed"> FFT Source: Processed IQ
+        </label>
       </div>
 
       <div class="body-2" style="margin-top: 20px;" v-if="connected">
@@ -81,11 +105,11 @@
       </div>
       <div style="width: 100%; height: 30vh; position: relative">
         <canvas id="fft" ref="fftCanvas"></canvas>
-        <div class="axis" style="left: 0% ">{{ formatFreq(centerFreq - sampleRate/2) }}</div>
-        <div class="axis" style="left: 25% ">{{ formatFreq(centerFreq - sampleRate/4) }}</div>
-        <div class="axis" style="left: 50% ">{{ formatFreq(centerFreq) }}</div>
-        <div class="axis" style="left: 75%">{{ formatFreq(centerFreq + sampleRate/4) }}</div>
-        <div class="axis right" style="right: 0%">{{ formatFreq(centerFreq + sampleRate/2) }}</div>
+        <div class="axis" style="left: 0% ">{{ formatFreq(displayMinFreq) }}</div>
+        <div class="axis" style="left: 25% ">{{ formatFreq(displayMinFreq + viewBandwidthHz * 0.25) }}</div>
+        <div class="axis" style="left: 50% ">{{ formatFreq(viewCenterFreq) }}</div>
+        <div class="axis" style="left: 75%">{{ formatFreq(displayMinFreq + viewBandwidthHz * 0.75) }}</div>
+        <div class="axis right" style="right: 0%">{{ formatFreq(displayMaxFreq) }}</div>
       </div>
     </div>
   </div>
@@ -108,21 +132,44 @@ const snackbar = reactive({ show: false, message: '' });
 const info = reactive({ boardName: '', firmwareVersion: '' });
 
 // 受信パラメータ
-const sampleRate = 2_000_000; // 2MHz
-const decimationFactor = 40;  // 2MHz / 40 = 50kHz オーディオレート
-const targetFreq = ref(1_025_000); // デフォルト 1025kHz に設定
-const usableBandwidthRatio = 0.75; // HackRFのBBフィルタ想定帯域（表示上の有効域）
+const decimationFactor = 40;  // 基本の復調系ダウンサンプリング比
+const minTuneFreqHz = 1_000_000;
+const minDisplayBandwidthHz = 100_000;
+const maxHackRFSampleRate = 20_000_000;
+const minHackRFSampleRate = 2_000_000;
+const sampleRateStepHz = 100_000;
+const usableBandwidthRatio = 0.75; // HackRFのBBフィルタ想定帯域
+const forcedTargetOffsetHz = 250_000; // target と RF center の最小分離（DC回避）
+
+const viewCenterFreq = ref(1_025_000);
+const viewBandwidthHz = ref(1_500_000);
+const targetFreq = ref(1_025_000);
+const rfCenterFreq = ref(1_275_000);
+const rxSampleRate = ref(2_000_000);
 const ifMinHz = ref(0);
 const ifMaxHz = ref(4_500);
+const dcCancelEnabled = ref(true);
+const fftUseProcessed = ref(true);
 
-// NCOのオフセットを計算 (下限制御のために centerFreq を sampleRate/2 以上に保つ)
-const minCenterFreq = sampleRate / 2; // 1,000,000 Hz 
-const centerFreq = ref(Math.max(targetFreq.value - 250_000, minCenterFreq)); 
-const ncoOffset = ref(targetFreq.value - centerFreq.value);
+const maxDisplayBandwidthHz =
+  maxHackRFSampleRate * usableBandwidthRatio - 2 * forcedTargetOffsetHz;
+const displayMinFreq = computed(() => viewCenterFreq.value - viewBandwidthHz.value / 2);
+const displayMaxFreq = computed(() => viewCenterFreq.value + viewBandwidthHz.value / 2);
+const ncoOffset = computed(() => targetFreq.value - rfCenterFreq.value);
 
 const targetFreqKHz = computed({
   get: () => targetFreq.value / 1000,
   set: (val) => { targetFreq.value = val * 1000; }
+});
+
+const viewCenterFreqKHz = computed({
+  get: () => viewCenterFreq.value / 1000,
+  set: (val) => { viewCenterFreq.value = val * 1000; }
+});
+
+const viewBandwidthKHz = computed({
+  get: () => viewBandwidthHz.value / 1000,
+  set: (val) => { viewBandwidthHz.value = val * 1000; }
 });
 
 const options = reactive({
@@ -154,18 +201,92 @@ const formatFreq = (hz: number) => {
   return (hz / 1_000_000).toFixed(3) + " MHz";
 };
 
-const onFreqChange = async () => {
-  // アプリケーション側で中心周波数の下限(1MHz)を保障し、負の開始周波数の発生を防ぐ
-  const minCenterFreq = sampleRate / 2;
-  centerFreq.value = Math.max(targetFreq.value - 250_000, minCenterFreq);
-  ncoOffset.value = targetFreq.value - centerFreq.value;
+const chooseSampleRate = (requiredUsableBandwidth: number) => {
+  const required = requiredUsableBandwidth / usableBandwidthRatio;
+  const stepped = Math.ceil(required / sampleRateStepHz) * sampleRateStepHz;
+  return Math.max(minHackRFSampleRate, Math.min(maxHackRFSampleRate, stepped));
+};
 
-  if (backend && running.value) {
-    // ソフトウェア(WASM側のNCO)のオフセット追従と
-    // ハードウェア(HackRFのLO)の再チューニングを同時に実行する
-    await backend.setFreq(centerFreq.value);
-    await backend.setTargetFreq(centerFreq.value, targetFreq.value);
+const clampTargetIntoView = () => {
+  const minHz = Math.max(minTuneFreqHz, displayMinFreq.value);
+  const maxHz = Math.max(minHz, displayMaxFreq.value);
+  if (targetFreq.value < minHz) targetFreq.value = minHz;
+  if (targetFreq.value > maxHz) targetFreq.value = maxHz;
+};
+
+const chooseRfCenterForTarget = () => {
+  const candidates = [
+    targetFreq.value - forcedTargetOffsetHz,
+    targetFreq.value + forcedTargetOffsetHz,
+  ].filter((hz) => hz >= minTuneFreqHz);
+
+  if (candidates.length === 0) {
+    return minTuneFreqHz;
   }
+
+  return candidates.reduce((best, cur) =>
+    Math.abs(cur - viewCenterFreq.value) < Math.abs(best - viewCenterFreq.value) ? cur : best
+  );
+};
+
+const normalizeViewRange = () => {
+  if (viewCenterFreq.value < minTuneFreqHz) viewCenterFreq.value = minTuneFreqHz;
+  if (viewBandwidthHz.value < minDisplayBandwidthHz) viewBandwidthHz.value = minDisplayBandwidthHz;
+  if (viewBandwidthHz.value > maxDisplayBandwidthHz) viewBandwidthHz.value = maxDisplayBandwidthHz;
+  clampTargetIntoView();
+  rfCenterFreq.value = chooseRfCenterForTarget();
+
+  const requiredUsable =
+    viewBandwidthHz.value + 2 * Math.abs(viewCenterFreq.value - rfCenterFreq.value);
+  rxSampleRate.value = chooseSampleRate(requiredUsable);
+};
+
+const restartRx = async () => {
+  if (!running.value) return;
+  await stop();
+  await start();
+};
+
+const onViewRangeChange = async () => {
+  normalizeViewRange();
+  await restartRx();
+};
+
+const onTargetFreqChange = async () => {
+  normalizeViewRange();
+  await restartRx();
+};
+
+normalizeViewRange();
+
+const computeFftViewWindow = (fftSize: number) => {
+  const sampleRate = rxSampleRate.value;
+  const toBin = (relHz: number) => (relHz / sampleRate + 0.5) * fftSize;
+  const minRel = displayMinFreq.value - rfCenterFreq.value;
+  const maxRel = displayMaxFreq.value - rfCenterFreq.value;
+  const desiredBins = Math.max(1, Math.ceil(toBin(maxRel) - toBin(minRel)));
+  let startBin = Math.floor(toBin(minRel));
+  let endBin = startBin + desiredBins;
+
+  if (startBin < 0) {
+    endBin -= startBin;
+    startBin = 0;
+  }
+  if (endBin > fftSize) {
+    startBin -= endBin - fftSize;
+    endBin = fftSize;
+  }
+  if (startBin < 0) {
+    startBin = 0;
+  }
+  if (endBin <= startBin) {
+    endBin = Math.min(fftSize, startBin + 1);
+  }
+
+  return {
+    startBin,
+    bins: endBin - startBin,
+  };
 };
 
 const onIfBandChange = async () => {
@@ -270,6 +391,7 @@ const stopAudio = () => {
 const start = async () => {
   if (!connected.value) return;
 
+  normalizeViewRange();
   await initAudio();
 
   if (!fftCanvas.value || !waterfallCanvas.value) {
@@ -288,75 +410,50 @@ const start = async () => {
 
   // FFTサイズはキャンバスの幅を元に、次数の大きい直近の「2のべき乗」に合わせる
   const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
-  let fftSize = Math.pow(2, Math.ceil(Math.log2(freqBinCount0)));
-  if (fftSize < 256) fftSize = 256;
-  if (fftSize > 8192) fftSize = 8192; // 上限
-  const usableBins = Math.max(1, Math.floor(fftSize * usableBandwidthRatio));
-  const edgeBins = Math.max(0, Math.floor((fftSize - usableBins) / 2));
-  const usableStartBin = edgeBins;
-  const usableEndBin = fftSize - edgeBins - 1;
-  const maskedFftOut = new Float32Array(fftSize);
+  let fftSizeFull = Math.pow(2, Math.ceil(Math.log2(freqBinCount0)));
+  if (fftSizeFull < 256) fftSizeFull = 256;
+  if (fftSizeFull > 8192) fftSizeFull = 8192;
+
+  const fftViewWindow = computeFftViewWindow(fftSizeFull);
+  const fftVisibleBins = fftViewWindow.bins;
 
   // キャンバスの内部解像度を FFT の bin 数に合わせる
-  canvasFft.width = fftSize;
+  canvasFft.width = fftVisibleBins;
   canvasFft.height = 200;
 
   const maxTextureSize = 16384; // Typical max texture size for WebGL
-  const useWebGL = fftSize <= maxTextureSize;
+  const useWebGL = fftVisibleBins <= maxTextureSize;
 
   waterfall = useWebGL ?
-    new WaterfallGL(canvasWf, fftSize, 256) :
-    new Waterfall(canvasWf, fftSize, 256);
+    new WaterfallGL(canvasWf, fftVisibleBins, 256) :
+    new Waterfall(canvasWf, fftVisibleBins, 256);
 
   // Comlinkのコールバック関数は proxy に包む必要がある
   const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array) => {
     playAudioBuffer(audioOut);
     if (waterfall) {
-      for (let i = 0; i < fftSize; i++) {
-        const inUsableBand = i >= usableStartBin && i <= usableEndBin;
-        maskedFftOut[i] = inUsableBand ? (fftOut[i] ?? -120) : -120;
-      }
-      waterfall.renderLine(maskedFftOut);
+      waterfall.renderLine(fftOut);
 
       // FFT表示
       canvasFftCtx.clearRect(0, 0, canvasFft.width, canvasFft.height);
       canvasFftCtx.save();
       canvasFftCtx.beginPath();
       canvasFftCtx.moveTo(0, canvasFft.height);
-      for (let i = 0; i < fftSize; i++) {
-        // 有効帯域外は表示上マスク済み
-        const val = maskedFftOut[i] !== undefined ? maskedFftOut[i]! : -120;
+      for (let i = 0; i < fftOut.length; i++) {
+        const val = fftOut[i] !== undefined ? fftOut[i]! : -120;
         const n = (val + 45) / 42; // Adjust for visualization range
         canvasFftCtx.lineTo(i, canvasFft.height - canvasFft.height * n);
       }
       canvasFftCtx.strokeStyle = "#fff";
       canvasFftCtx.stroke();
 
-      // 有効帯域外を薄く塗って、無効領域を明示
-      if (edgeBins > 0) {
-        canvasFftCtx.fillStyle = "rgba(0, 0, 0, 0.45)";
-        canvasFftCtx.fillRect(0, 0, usableStartBin, canvasFft.height);
-        canvasFftCtx.fillRect(usableEndBin + 1, 0, fftSize - usableEndBin - 1, canvasFft.height);
-
-        canvasFftCtx.beginPath();
-        canvasFftCtx.moveTo(usableStartBin, 0);
-        canvasFftCtx.lineTo(usableStartBin, canvasFft.height);
-        canvasFftCtx.moveTo(usableEndBin, 0);
-        canvasFftCtx.lineTo(usableEndBin, canvasFft.height);
-        canvasFftCtx.strokeStyle = "rgba(80, 200, 255, 0.7)";
-        canvasFftCtx.lineWidth = 1;
-        canvasFftCtx.stroke();
-      }
-
       // targetFreq (NCOオフセット位置) に赤い線を引く
-      // freqBinCount と同じく、キャンバスの幅 = サンプリングレート(2MHz) の帯域幅
-      // targetFreq は centerFreq から targetFreqKHz の差分に相当するため、開始位置は centerFreq - sampleRate/2
       const targetHz = targetFreq.value;
-      const startHz = centerFreq.value - sampleRate / 2;
+      const startHz = displayMinFreq.value;
+      const widthHz = viewBandwidthHz.value;
       
-      // 全体 (sampleRate) のうち、現在の targetHz は startHz からどれだけ進んだか
-      const ratio = (targetHz - startHz) / sampleRate;
-      const x = fftSize * ratio;
+      const ratio = Math.min(1, Math.max(0, (targetHz - startHz) / widthHz));
+      const x = canvasFft.width * ratio;
 
       canvasFftCtx.beginPath();
       canvasFftCtx.moveTo(x, 0);
@@ -370,14 +467,18 @@ const start = async () => {
   });
 
   await backend.startRx({
-    sampleRate,
-    centerFreq: centerFreq.value,
+    sampleRate: rxSampleRate.value,
+    centerFreq: rfCenterFreq.value,
     targetFreq: targetFreq.value,
     decimationFactor,
     outputSampleRate: audioCtx!.sampleRate, // Use actual audio context sample rate
-    fftSize,
+    fftSize: fftSizeFull,
+    fftVisibleStartBin: fftViewWindow.startBin,
+    fftVisibleBins,
     ifMinHz: ifMinHz.value,
     ifMaxHz: ifMaxHz.value,
+    dcCancelEnabled: dcCancelEnabled.value,
+    fftUseProcessed: fftUseProcessed.value,
   }, onData);
 
   running.value = true;
@@ -396,6 +497,12 @@ watch(() => options.lnaGain, (val) => { if (connected.value) backend.setLnaGain(
 watch(() => options.vgaGain, (val) => { if (connected.value) backend.setVgaGain(val); });
 watch(() => options.ampEnabled, (val) => { if (connected.value) backend.setAmpEnable(val); });
 watch(() => options.antennaEnabled, (val) => { if (connected.value) backend.setAntennaEnable(val); });
+watch(() => dcCancelEnabled.value, (val) => {
+  if (connected.value && running.value) backend.setDcCancelEnabled(val);
+});
+watch(() => fftUseProcessed.value, (val) => {
+  if (connected.value && running.value) backend.setFftUseProcessed(val);
+});
 
 onUnmounted(() => {
   disconnect();
