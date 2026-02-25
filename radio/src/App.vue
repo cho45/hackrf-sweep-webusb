@@ -141,15 +141,83 @@ const sampleRateStepHz = 100_000;
 const usableBandwidthRatio = 0.75; // HackRFのBBフィルタ想定帯域
 const forcedTargetOffsetHz = 250_000; // target と RF center の最小分離（DC回避）
 
-const viewCenterFreq = ref(1_025_000);
-const viewBandwidthHz = ref(1_500_000);
-const targetFreq = ref(1_025_000);
-const rfCenterFreq = ref(1_275_000);
+const settingsStorageKey = 'radio.settings.v1';
+type PersistedSettings = {
+  viewCenterFreq: number;
+  viewBandwidthHz: number;
+  targetFreq: number;
+  ifMinHz: number;
+  ifMaxHz: number;
+  dcCancelEnabled: boolean;
+  fftUseProcessed: boolean;
+  ampEnabled: boolean;
+  antennaEnabled: boolean;
+  lnaGain: number;
+  vgaGain: number;
+};
+
+const defaultSettings: PersistedSettings = {
+  viewCenterFreq: 1_025_000,
+  viewBandwidthHz: 1_500_000,
+  targetFreq: 1_025_000,
+  ifMinHz: 0,
+  ifMaxHz: 4_500,
+  dcCancelEnabled: true,
+  fftUseProcessed: true,
+  ampEnabled: false,
+  antennaEnabled: false,
+  lnaGain: 16,
+  vgaGain: 16,
+};
+
+const loadSettings = (): PersistedSettings => {
+  try {
+    const raw = localStorage.getItem(settingsStorageKey);
+    if (!raw) return { ...defaultSettings };
+    const parsed = JSON.parse(raw) as Partial<PersistedSettings>;
+
+    const getNumber = (key: keyof PersistedSettings) => {
+      const value = parsed[key];
+      return typeof value === 'number' && Number.isFinite(value)
+        ? value
+        : defaultSettings[key] as number;
+    };
+    const getBoolean = (key: keyof PersistedSettings) => {
+      const value = parsed[key];
+      return typeof value === 'boolean'
+        ? value
+        : defaultSettings[key] as boolean;
+    };
+
+    return {
+      viewCenterFreq: getNumber('viewCenterFreq'),
+      viewBandwidthHz: getNumber('viewBandwidthHz'),
+      targetFreq: getNumber('targetFreq'),
+      ifMinHz: getNumber('ifMinHz'),
+      ifMaxHz: getNumber('ifMaxHz'),
+      dcCancelEnabled: getBoolean('dcCancelEnabled'),
+      fftUseProcessed: getBoolean('fftUseProcessed'),
+      ampEnabled: getBoolean('ampEnabled'),
+      antennaEnabled: getBoolean('antennaEnabled'),
+      lnaGain: getNumber('lnaGain'),
+      vgaGain: getNumber('vgaGain'),
+    };
+  } catch {
+    return { ...defaultSettings };
+  }
+};
+
+const loadedSettings = loadSettings();
+
+const viewCenterFreq = ref(loadedSettings.viewCenterFreq);
+const viewBandwidthHz = ref(loadedSettings.viewBandwidthHz);
+const targetFreq = ref(loadedSettings.targetFreq);
+const rfCenterFreq = ref(loadedSettings.targetFreq + forcedTargetOffsetHz);
 const rxSampleRate = ref(2_000_000);
-const ifMinHz = ref(0);
-const ifMaxHz = ref(4_500);
-const dcCancelEnabled = ref(true);
-const fftUseProcessed = ref(true);
+const ifMinHz = ref(loadedSettings.ifMinHz);
+const ifMaxHz = ref(loadedSettings.ifMaxHz);
+const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
+const fftUseProcessed = ref(loadedSettings.fftUseProcessed);
 
 const maxDisplayBandwidthHz =
   maxHackRFSampleRate * usableBandwidthRatio - 2 * forcedTargetOffsetHz;
@@ -173,10 +241,10 @@ const viewBandwidthKHz = computed({
 });
 
 const options = reactive({
-  ampEnabled: false,
-  antennaEnabled: false,
-  lnaGain: 16,
-  vgaGain: 16,
+  ampEnabled: loadedSettings.ampEnabled,
+  antennaEnabled: loadedSettings.antennaEnabled,
+  lnaGain: loadedSettings.lnaGain,
+  vgaGain: loadedSettings.vgaGain,
 });
 
 let backend: any = null;
@@ -258,6 +326,27 @@ const onTargetFreqChange = async () => {
 };
 
 normalizeViewRange();
+const saveSettings = () => {
+  try {
+    const data: PersistedSettings = {
+      viewCenterFreq: viewCenterFreq.value,
+      viewBandwidthHz: viewBandwidthHz.value,
+      targetFreq: targetFreq.value,
+      ifMinHz: ifMinHz.value,
+      ifMaxHz: ifMaxHz.value,
+      dcCancelEnabled: dcCancelEnabled.value,
+      fftUseProcessed: fftUseProcessed.value,
+      ampEnabled: options.ampEnabled,
+      antennaEnabled: options.antennaEnabled,
+      lnaGain: options.lnaGain,
+      vgaGain: options.vgaGain,
+    };
+    localStorage.setItem(settingsStorageKey, JSON.stringify(data));
+  } catch {
+    // localStorage unavailable/quota exceeded
+  }
+};
+saveSettings();
 
 const computeFftViewWindow = (fftSize: number) => {
   const sampleRate = rxSampleRate.value;
@@ -503,6 +592,22 @@ watch(() => dcCancelEnabled.value, (val) => {
 watch(() => fftUseProcessed.value, (val) => {
   if (connected.value && running.value) backend.setFftUseProcessed(val);
 });
+watch(
+  [
+    viewCenterFreq,
+    viewBandwidthHz,
+    targetFreq,
+    ifMinHz,
+    ifMaxHz,
+    dcCancelEnabled,
+    fftUseProcessed,
+    () => options.ampEnabled,
+    () => options.antennaEnabled,
+    () => options.lnaGain,
+    () => options.vgaGain,
+  ],
+  () => { saveSettings(); }
+);
 
 onUnmounted(() => {
   disconnect();
