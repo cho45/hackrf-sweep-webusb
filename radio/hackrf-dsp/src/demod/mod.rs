@@ -1,6 +1,6 @@
 use num_complex::Complex;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use std::arch::wasm32::{f32x4, v128};
+use std::arch::wasm32::{f32x4, f32x4_add, f32x4_mul, f32x4_sub, i32x4_shuffle, v128};
 
 pub mod am;
 pub mod fm;
@@ -13,15 +13,59 @@ pub use fm::FMDemodulator;
 pub struct Nco {
     osc: Complex<f32>,
     phase_inc: Complex<f32>,
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    phase_pairs: [v128; 4],
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    phase_inc8: Complex<f32>,
     renorm_counter: u32,
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+fn complex_mul_interleaved2_simd(input: v128, osc: v128) -> v128 {
+    let osc_swapped = i32x4_shuffle::<1, 0, 3, 2>(osc, osc);
+
+    let prod_re = f32x4_mul(input, osc);
+    let prod_im = f32x4_mul(input, osc_swapped);
+
+    let prod_re_swapped = i32x4_shuffle::<1, 0, 3, 2>(prod_re, prod_re);
+    let prod_im_swapped = i32x4_shuffle::<1, 0, 3, 2>(prod_im, prod_im);
+
+    let re = f32x4_sub(prod_re, prod_re_swapped);
+    let im = f32x4_add(prod_im, prod_im_swapped);
+
+    i32x4_shuffle::<0, 4, 2, 6>(re, im)
 }
 
 impl Nco {
     pub fn new(freq_hz: f32, sample_rate: f32) -> Self {
         let dphi = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
+        let phase_inc = Complex::new(dphi.cos(), dphi.sin());
+        #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+        let (phase_pairs, phase_inc8) = {
+            let mut p = Complex::new(1.0, 0.0);
+            let mut powers = [Complex::new(0.0, 0.0); 8];
+            for slot in &mut powers {
+                *slot = p;
+                p *= phase_inc;
+            }
+            (
+                [
+                    f32x4(powers[0].re, powers[0].im, powers[1].re, powers[1].im),
+                    f32x4(powers[2].re, powers[2].im, powers[3].re, powers[3].im),
+                    f32x4(powers[4].re, powers[4].im, powers[5].re, powers[5].im),
+                    f32x4(powers[6].re, powers[6].im, powers[7].re, powers[7].im),
+                ],
+                p,
+            )
+        };
         Self {
             osc: Complex::new(1.0, 0.0),
-            phase_inc: Complex::new(dphi.cos(), dphi.sin()),
+            phase_inc,
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            phase_pairs,
+            #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+            phase_inc8,
             renorm_counter: 0,
         }
     }
@@ -49,27 +93,13 @@ impl Nco {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     #[inline]
     pub fn step8_interleaved(&mut self) -> (v128, v128, v128, v128) {
-        let mut osc = self.osc;
-        let inc = self.phase_inc;
+        let osc_pair = f32x4(self.osc.re, self.osc.im, self.osc.re, self.osc.im);
+        let n0 = complex_mul_interleaved2_simd(osc_pair, self.phase_pairs[0]);
+        let n1 = complex_mul_interleaved2_simd(osc_pair, self.phase_pairs[1]);
+        let n2 = complex_mul_interleaved2_simd(osc_pair, self.phase_pairs[2]);
+        let n3 = complex_mul_interleaved2_simd(osc_pair, self.phase_pairs[3]);
 
-        let a0 = osc;
-        osc *= inc;
-        let a1 = osc;
-        osc *= inc;
-        let a2 = osc;
-        osc *= inc;
-        let a3 = osc;
-        osc *= inc;
-        let a4 = osc;
-        osc *= inc;
-        let a5 = osc;
-        osc *= inc;
-        let a6 = osc;
-        osc *= inc;
-        let a7 = osc;
-        osc *= inc;
-
-        self.osc = osc;
+        self.osc *= self.phase_inc8;
         self.renorm_counter = self.renorm_counter.wrapping_add(8);
         if self.renorm_counter >= 1024 {
             self.renorm_counter = 0;
@@ -81,12 +111,7 @@ impl Nco {
             }
         }
 
-        (
-            f32x4(a0.re, a0.im, a1.re, a1.im),
-            f32x4(a2.re, a2.im, a3.re, a3.im),
-            f32x4(a4.re, a4.im, a5.re, a5.im),
-            f32x4(a6.re, a6.im, a7.re, a7.im),
-        )
+        (n0, n1, n2, n3)
     }
 }
 
