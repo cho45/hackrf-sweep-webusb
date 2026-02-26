@@ -44,6 +44,7 @@ type ReceiverCtor = new (
 	process_iq_len: (iqLen: number) => number;
 	audio_output_channels: () => number;
 	get_stats: () => unknown;
+	set_fft_view: (startBin: number, visibleBins: number) => void;
 	free: () => void;
 	set_target_freq: (centerFreq: number, targetFreq: number) => void;
 	set_if_band: (minHz: number, maxHz: number) => void;
@@ -103,6 +104,7 @@ export class RadioBackend {
 	private antennaEnabled = false;
 	private lnaGain = 16;
 	private vgaGain = 16;
+	private fftVisibleBins = 0;
 
 	private async ensureWasm() {
 		if (!this.wasmBindings) {
@@ -268,7 +270,8 @@ export class RadioBackend {
 			1024,
 			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2 * audioChannels)
 		);
-		const fftCapacity = options.fftVisibleBins;
+		const fftCapacity = options.fftSize;
+		this.fftVisibleBins = options.fftVisibleBins;
 		await this.receiver.alloc_io_buffers(
 			HackRF.TRANSFER_BUFFER_SIZE,
 			audioCapacity,
@@ -296,17 +299,17 @@ export class RadioBackend {
 		let memoryBuffer = wasmMemory.buffer;
 		let iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
 		let audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
-		let fftReadView = new Float32Array(memoryBuffer, fftPtr, fftCapacity);
+		let fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
 
 		const ensureViews = () => {
 			if (memoryBuffer === wasmMemory.buffer) return;
 			memoryBuffer = wasmMemory.buffer;
 			iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
 			audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
-			fftReadView = new Float32Array(memoryBuffer, fftPtr, fftCapacity);
-		};
+				fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
+			};
 
-		const fftScratch = new Float32Array(fftCapacity);
+		let fftScratch = new Float32Array(this.fftVisibleBins);
 
 		let perfStarted = false;
 		let perfWindowStart = 0;
@@ -417,10 +420,17 @@ export class RadioBackend {
 						);
 					}
 				}
-				fftScratch.set(fftReadView);
-				audioFramesOutTotal += Math.floor(audioLen / audioChannels);
-				const perf = snapshotPerf(performance.now());
-				onData(fftScratch, perf);
+					const visibleBins = Math.max(
+						1,
+						Math.min(this.fftVisibleBins || fftOutCapacity, fftOutCapacity)
+					);
+					if (fftScratch.length !== visibleBins) {
+						fftScratch = new Float32Array(visibleBins);
+					}
+					fftScratch.set(fftReadView.subarray(0, visibleBins));
+					audioFramesOutTotal += Math.floor(audioLen / audioChannels);
+					const perf = snapshotPerf(performance.now());
+					onData(fftScratch, perf);
 			}
 		});
 	}
@@ -441,6 +451,7 @@ export class RadioBackend {
 			this.receiver.free();
 			this.receiver = undefined;
 		}
+		this.fftVisibleBins = 0;
 	}
 
 	async setTargetFreq(centerFreq: number, targetFreq: number) {
@@ -458,6 +469,13 @@ export class RadioBackend {
 	async setDcCancelEnabled(enabled: boolean) {
 		if (this.receiver) {
 			this.receiver.set_dc_cancel_enabled(enabled);
+		}
+	}
+
+	async setFftView(startBin: number, visibleBins: number) {
+		if (this.receiver) {
+			this.receiver.set_fft_view(startBin, visibleBins);
+			this.fftVisibleBins = visibleBins;
 		}
 	}
 }

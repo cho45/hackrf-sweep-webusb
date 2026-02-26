@@ -359,6 +359,10 @@ const audioPerf = reactive({
   // バッファ保護のためのサンプル破棄監視
   droppedSamplesCount: 0,
 });
+const activeRxSampleRate = ref<number | null>(null);
+const activeRfCenterFreq = ref<number | null>(null);
+const activeFftSize = ref(0);
+const activeFftVisibleBins = ref(0);
 
 const showSnackbar = (msg: string) => {
   snackbar.message = msg;
@@ -403,7 +407,38 @@ const restartRx = async () => {
 
 const onTuneChange = async () => {
   normalizeTuning();
-  await restartRx();
+  if (!running.value || rxTransitioning.value || !backend) return;
+
+  // サンプルレート変更時だけ full restart する。
+  if (activeRxSampleRate.value === null || rxSampleRate.value !== activeRxSampleRate.value) {
+    await restartRx();
+    return;
+  }
+
+  try {
+    if (activeRfCenterFreq.value !== rfCenterFreq.value) {
+      await backend.setFreq(rfCenterFreq.value);
+    }
+    await backend.setTargetFreq(rfCenterFreq.value, targetFreq.value);
+
+    if (activeFftSize.value > 0) {
+      const fftViewWindow = computeFftViewWindow(activeFftSize.value);
+      await backend.setFftView(fftViewWindow.startBin, fftViewWindow.bins);
+
+      const canvasFft = fftCanvas.value;
+      const canvasWf = waterfallCanvas.value;
+      const canvasFftCtx = canvasFft?.getContext('2d');
+      if (canvasFft && canvasWf && canvasFftCtx && activeFftVisibleBins.value !== fftViewWindow.bins) {
+        setupFftRendering(canvasFft, canvasWf, canvasFftCtx, fftViewWindow.bins);
+      }
+      activeFftVisibleBins.value = fftViewWindow.bins;
+    }
+
+    activeRfCenterFreq.value = rfCenterFreq.value;
+  } catch (e: any) {
+    showSnackbar("Retune Error: " + (e?.message ?? String(e)));
+    await restartRx();
+  }
 };
 
 const openKeypad = (field: KeypadField) => {
@@ -667,6 +702,25 @@ const startRenderLoop = (
   renderLoopId = requestAnimationFrame(tick);
 };
 
+const setupFftRendering = (
+  canvasFft: HTMLCanvasElement,
+  canvasWf: HTMLCanvasElement,
+  canvasFftCtx: CanvasRenderingContext2D,
+  fftVisibleBins: number
+) => {
+  canvasFft.width = fftVisibleBins;
+  canvasFft.height = 200;
+
+  const maxTextureSize = 16384;
+  const useWebGL = fftVisibleBins <= maxTextureSize;
+  waterfall = useWebGL
+    ? new WaterfallGL(canvasWf, fftVisibleBins, 256)
+    : new Waterfall(canvasWf, fftVisibleBins, 256);
+
+  latestFftFrame = null;
+  startRenderLoop(canvasFftCtx, canvasFft);
+};
+
 const start = async () => {
   if (running.value || rxTransitioning.value) return;
   rxTransitioning.value = true;
@@ -693,26 +747,15 @@ const start = async () => {
       return;
     }
 
-  // FFTサイズはキャンバスの幅を元に、次数の大きい直近の「2のべき乗」に合わせる
-  const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
-  let fftSizeFull = Math.pow(2, Math.ceil(Math.log2(freqBinCount0)));
-  if (fftSizeFull < 256) fftSizeFull = 256;
-  if (fftSizeFull > 8192) fftSizeFull = 8192;
+    // FFTサイズはキャンバスの幅を元に、次数の大きい直近の「2のべき乗」に合わせる
+    const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
+    let fftSizeFull = Math.pow(2, Math.ceil(Math.log2(freqBinCount0)));
+    if (fftSizeFull < 256) fftSizeFull = 256;
+    if (fftSizeFull > 8192) fftSizeFull = 8192;
 
     const fftViewWindow = computeFftViewWindow(fftSizeFull);
     const fftVisibleBins = fftViewWindow.bins;
-
-  // キャンバスの内部解像度を FFT の bin 数に合わせる
-    canvasFft.width = fftVisibleBins;
-    canvasFft.height = 200;
-
-    const maxTextureSize = 16384; // Typical max texture size for WebGL
-    const useWebGL = fftVisibleBins <= maxTextureSize;
-
-    waterfall = useWebGL ?
-      new WaterfallGL(canvasWf, fftVisibleBins, 256) :
-      new Waterfall(canvasWf, fftVisibleBins, 256);
-    startRenderLoop(canvasFftCtx, canvasFft);
+    setupFftRendering(canvasFft, canvasWf, canvasFftCtx, fftVisibleBins);
 
     const channel = new MessageChannel();
     audioNode!.port.postMessage({ type: 'attach-input-port', port: channel.port1 }, [channel.port1]);
@@ -755,6 +798,10 @@ const start = async () => {
     }, onData);
 
     running.value = true;
+    activeRxSampleRate.value = rxSampleRate.value;
+    activeRfCenterFreq.value = rfCenterFreq.value;
+    activeFftSize.value = fftSizeFull;
+    activeFftVisibleBins.value = fftVisibleBins;
   } catch (e: any) {
     stopRenderLoop();
     stopAudio();
@@ -782,6 +829,10 @@ const stop = async () => {
     stopRenderLoop();
     stopAudio();
     running.value = false;
+    activeRxSampleRate.value = null;
+    activeRfCenterFreq.value = null;
+    activeFftSize.value = 0;
+    activeFftVisibleBins.value = 0;
     rxTransitioning.value = false;
   }
 };
