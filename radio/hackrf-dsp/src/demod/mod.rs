@@ -1,4 +1,6 @@
 use num_complex::Complex;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::{f32x4, v128};
 
 pub mod am;
 pub mod fm;
@@ -42,6 +44,49 @@ impl Nco {
             }
         }
         val
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    #[inline]
+    pub fn step8_interleaved(&mut self) -> (v128, v128, v128, v128) {
+        let mut osc = self.osc;
+        let inc = self.phase_inc;
+
+        let a0 = osc;
+        osc *= inc;
+        let a1 = osc;
+        osc *= inc;
+        let a2 = osc;
+        osc *= inc;
+        let a3 = osc;
+        osc *= inc;
+        let a4 = osc;
+        osc *= inc;
+        let a5 = osc;
+        osc *= inc;
+        let a6 = osc;
+        osc *= inc;
+        let a7 = osc;
+        osc *= inc;
+
+        self.osc = osc;
+        self.renorm_counter = self.renorm_counter.wrapping_add(8);
+        if self.renorm_counter >= 1024 {
+            self.renorm_counter = 0;
+            let norm = self.osc.norm();
+            if norm > 1e-12 {
+                self.osc /= norm;
+            } else {
+                self.osc = Complex::new(1.0, 0.0);
+            }
+        }
+
+        (
+            f32x4(a0.re, a0.im, a1.re, a1.im),
+            f32x4(a2.re, a2.im, a3.re, a3.im),
+            f32x4(a4.re, a4.im, a5.re, a5.im),
+            f32x4(a6.re, a6.im, a7.re, a7.im),
+        )
     }
 }
 

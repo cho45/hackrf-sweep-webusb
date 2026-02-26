@@ -10,7 +10,7 @@ pub mod bench;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{
-    f32x4, f32x4_add, f32x4_convert_i32x4, f32x4_mul, f32x4_splat, f32x4_sub,
+    f32x4_add, f32x4_convert_i32x4, f32x4_mul, f32x4_splat, f32x4_sub,
     i16x8_extend_high_i8x16, i16x8_extend_low_i8x16, i32x4_extend_high_i16x8,
     i32x4_extend_low_i16x8, i32x4_shuffle, v128, v128_load, v128_store,
 };
@@ -488,27 +488,7 @@ impl Receiver {
         while idx + 8 <= num_samples {
             let (x0, x1, x2, x3) =
                 unsafe { unpack_iq16_to_f32x4x4_simd(iq_data.as_ptr().add(idx * 2)) };
-
-            let n0 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n1 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n2 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n3 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
+            let (n0, n1, n2, n3) = self.nco.step8_interleaved();
 
             let y0 = unsafe { complex_mul_interleaved2_f32_simd(x0, n0) };
             let y1 = unsafe { complex_mul_interleaved2_f32_simd(x1, n1) };
