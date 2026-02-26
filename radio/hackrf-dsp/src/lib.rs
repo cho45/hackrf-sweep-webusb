@@ -390,6 +390,11 @@ impl Receiver {
     pub fn set_target_freq(&mut self, center_freq: f32, target_freq: f32) {
         let offset_hz = target_freq - center_freq;
         self.nco = Nco::new(-offset_hz, self.sample_rate);
+        if self.mode == DemodMode::Fm {
+            // リチューン時はFM復調・ステレオ判定の状態を引きずらない。
+            self.fm_demod = FMDemodulator::new(FM_MAX_DEVIATION_HZ, self.demod_sample_rate);
+            self.fm_stereo.reset();
+        }
     }
 
     /// IFチャンネルフィルタの通過帯域を変更する（Hz）
@@ -401,6 +406,11 @@ impl Receiver {
             self.if_min_hz / self.coarse_stage_rate,
             self.if_max_hz / self.coarse_stage_rate,
         );
+        if self.mode == DemodMode::Fm {
+            // IF帯域変更時も過去状態が混ざらないようにリセットする。
+            self.fm_demod = FMDemodulator::new(FM_MAX_DEVIATION_HZ, self.demod_sample_rate);
+            self.fm_stereo.reset();
+        }
     }
 
     /// FFT表示窓（開始binと幅）を設定する
