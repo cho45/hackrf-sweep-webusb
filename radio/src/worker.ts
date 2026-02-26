@@ -8,6 +8,8 @@ type PerfStats = {
 	droppedIqBlocksCount: number;
 	// USB/スケジューリング由来の停止スパイク検知
 	blockIntervalMsPeak: number;
+	// 直近ブロックのDSP処理時間
+	dspProcessMsLast: number;
 	// DSP処理が詰まり要因になっていないか
 	dspProcessMsPeak: number;
 	// 長期の供給不足判定（短窓の揺れは見ない）
@@ -614,6 +616,7 @@ export class RadioBackend {
 		let blockCount = 0;
 		let droppedIqBlocksCount = 0;
 		let blockIntervalMsPeak = 0;
+		let dspProcessMsLast = 0;
 		let dspProcessMsPeak = 0;
 		let audioFramesOutTotal = 0;
 
@@ -655,6 +658,7 @@ export class RadioBackend {
 				const stats: PerfStats = {
 					droppedIqBlocksCount,
 					blockIntervalMsPeak,
+					dspProcessMsLast,
 					dspProcessMsPeak,
 					audioOutHzLong: audioFramesOutTotal / totalSec,
 					fmStereoPilotLevel: readStatNum(
@@ -742,6 +746,7 @@ export class RadioBackend {
 			// process中にWasmメモリが再配置される場合があるため再取得する
 			ensureViews();
 			const processMs = performance.now() - processStart;
+			dspProcessMsLast = processMs;
 			if (processMs > dspProcessMsPeak) {
 				dspProcessMsPeak = processMs;
 			}

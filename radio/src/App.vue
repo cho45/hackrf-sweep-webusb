@@ -100,7 +100,7 @@
       <div class="perf-panel body-2" v-if="running && showDebugInfo">
         <div><b>DSP</b></div>
         <div>block interval peak: {{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }} ms</div>
-        <div>process peak: {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
+        <div>process last/peak: {{ fmtNum(dspPerf.dspProcessMsLast, 2) }} / {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
         <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
         <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
         <div>fft target/noise/snr: {{ fmtNum(dspPerf.fftTargetDb, 1) }} / {{ fmtNum(dspPerf.fftNoiseFloorDb, 1) }} / {{ fmtNum(dspPerf.fftSnrDb, 1) }} dB</div>
@@ -312,6 +312,8 @@ type DspPerfStats = {
   // USB/スケジューリング由来の停止スパイク
   blockIntervalMsPeak: number;
   // DSP処理詰まりの検知
+  dspProcessMsLast: number;
+  // DSP処理詰まりのピーク
   dspProcessMsPeak: number;
   // 長期供給不足の判定
   audioOutHzLong: number;
@@ -403,6 +405,8 @@ const dspPerf = reactive({
   // USB/スケジューリング停止スパイク監視
   blockIntervalMsPeak: 0,
   // DSP過負荷監視
+  dspProcessMsLast: 0,
+  // DSP過負荷ピーク監視
   dspProcessMsPeak: 0,
   // USB入力欠落監視
   droppedIqBlocksCount: 0,
@@ -921,6 +925,7 @@ const start = async () => {
       if (perf) {
         dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
         dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
+        dspPerf.dspProcessMsLast = perf.dspProcessMsLast;
         dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
         dspPerf.audioOutHzLong = perf.audioOutHzLong;
         dspPerf.fmStereoPilotLevel = perf.fmStereoPilotLevel;
