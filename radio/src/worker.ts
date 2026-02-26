@@ -71,16 +71,16 @@ class RadioBackend {
 			sampleRate: number;
 			centerFreq: number;
 			targetFreq: number;
-			decimationFactor: number;
+			demodMode: string;
 			outputSampleRate: number;
 			fftSize: number;
-				fftVisibleStartBin: number;
-				fftVisibleBins: number;
-				ifMinHz: number;
-				ifMaxHz: number;
-				dcCancelEnabled: boolean;
-				fftUseProcessed: boolean;
-			},
+			fftVisibleStartBin: number;
+			fftVisibleBins: number;
+			ifMinHz: number;
+			ifMaxHz: number;
+			dcCancelEnabled: boolean;
+			fftUseProcessed: boolean;
+		},
 		onData: (audioOut: Float32Array, fftOut: Float32Array) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
@@ -90,7 +90,7 @@ class RadioBackend {
 			options.sampleRate,
 			options.centerFreq,
 			options.targetFreq,
-			options.decimationFactor,
+			options.demodMode,
 			options.outputSampleRate,
 			options.fftSize,
 			options.fftVisibleStartBin,
@@ -111,8 +111,8 @@ class RadioBackend {
 			// Uint8Array は uint8 (0~255) だが HackRF の IQ データは i8 (-128~127) のため Int8Array にキャスト
 			const iqData = new Int8Array(data.buffer, data.byteOffset, data.byteLength);
 
-			// WASM に IQ データ配列を渡し、AM 復調処理とFFTを実行
-			const out = this.receiver.process_am(iqData);
+			// WASM に IQ データ配列を渡し、復調処理とFFTを実行
+			const out = this.receiver.process(iqData);
 			if (out && out.length === 2) {
 				const audioOut = (out[0] as unknown) as Float32Array;
 				const fftOut = (out[1] as unknown) as Float32Array;

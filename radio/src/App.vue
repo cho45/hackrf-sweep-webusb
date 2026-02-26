@@ -52,7 +52,16 @@
             <input type="number" min="1" step="100" v-model.number="ifMaxHz" @change="onIfBandChange" />
           </div>
         </div>
-        <div class="caption">AM包絡線検波では通常 IF Min = 0 Hz</div>
+
+        <div class="field">
+          <label>Demod Mode</label>
+          <div class="field-input">
+            <select v-model="demodMode" @change="onDemodModeChange" style="flex:1; padding:8px 12px; border:1px solid #444; border-radius:4px; background:#222; color:#fff; font-size:14px;">
+              <option value="AM">AM</option>
+              <option value="FM">FM (WFM)</option>
+            </select>
+          </div>
+        </div>
 
         <div class="divider"></div>
 
@@ -132,7 +141,6 @@ const snackbar = reactive({ show: false, message: '' });
 const info = reactive({ boardName: '', firmwareVersion: '' });
 
 // 受信パラメータ
-const decimationFactor = 40;  // 基本の復調系ダウンサンプリング比
 const minTuneFreqHz = 1_000_000;
 const minDisplayBandwidthHz = 100_000;
 const maxHackRFSampleRate = 20_000_000;
@@ -154,6 +162,7 @@ type PersistedSettings = {
   antennaEnabled: boolean;
   lnaGain: number;
   vgaGain: number;
+  demodMode: string;
 };
 
 const defaultSettings: PersistedSettings = {
@@ -168,6 +177,7 @@ const defaultSettings: PersistedSettings = {
   antennaEnabled: false,
   lnaGain: 16,
   vgaGain: 16,
+  demodMode: 'AM',
 };
 
 const loadSettings = (): PersistedSettings => {
@@ -201,6 +211,7 @@ const loadSettings = (): PersistedSettings => {
       antennaEnabled: getBoolean('antennaEnabled'),
       lnaGain: getNumber('lnaGain'),
       vgaGain: getNumber('vgaGain'),
+      demodMode: typeof parsed['demodMode'] === 'string' ? parsed['demodMode'] : defaultSettings.demodMode,
     };
   } catch {
     return { ...defaultSettings };
@@ -218,6 +229,7 @@ const ifMinHz = ref(loadedSettings.ifMinHz);
 const ifMaxHz = ref(loadedSettings.ifMaxHz);
 const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
 const fftUseProcessed = ref(loadedSettings.fftUseProcessed);
+const demodMode = ref(loadedSettings.demodMode);
 
 const maxDisplayBandwidthHz =
   maxHackRFSampleRate * usableBandwidthRatio - 2 * forcedTargetOffsetHz;
@@ -340,6 +352,7 @@ const saveSettings = () => {
       antennaEnabled: options.antennaEnabled,
       lnaGain: options.lnaGain,
       vgaGain: options.vgaGain,
+      demodMode: demodMode.value,
     };
     localStorage.setItem(settingsStorageKey, JSON.stringify(data));
   } catch {
@@ -386,6 +399,22 @@ const onIfBandChange = async () => {
 
   if (backend && running.value) {
     await backend.setIfBand(ifMinHz.value, ifMaxHz.value);
+  }
+};
+
+/// モード名に対応するデフォルトの IF Max を返す
+const defaultIfMaxHzForMode = (mode: string): number => {
+  return mode === 'FM' ? 100_000 : 4_500;
+};
+
+const onDemodModeChange = async () => {
+  // IFフィルタをモードに応じて自動更新
+  ifMaxHz.value = defaultIfMaxHzForMode(demodMode.value);
+  ifMinHz.value = 0;
+
+  if (backend && running.value) {
+    // フィルタ幅が大きく変わるため再起動
+    await restartRx();
   }
 };
 
@@ -559,8 +588,8 @@ const start = async () => {
     sampleRate: rxSampleRate.value,
     centerFreq: rfCenterFreq.value,
     targetFreq: targetFreq.value,
-    decimationFactor,
-    outputSampleRate: audioCtx!.sampleRate, // Use actual audio context sample rate
+    demodMode: demodMode.value,
+    outputSampleRate: audioCtx!.sampleRate,
     fftSize: fftSizeFull,
     fftVisibleStartBin: fftViewWindow.startBin,
     fftVisibleBins,
@@ -601,6 +630,7 @@ watch(
     ifMaxHz,
     dcCancelEnabled,
     fftUseProcessed,
+    demodMode,
     () => options.ampEnabled,
     () => options.antennaEnabled,
     () => options.lnaGain,

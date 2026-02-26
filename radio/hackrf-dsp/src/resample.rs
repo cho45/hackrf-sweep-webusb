@@ -17,9 +17,9 @@ impl Resampler {
         // 入力時間軸上での出力サンプル刻み
         let step = source_rate as f64 / target_rate as f64;
 
-        // 低レイテンシと帯域特性のバランス点
         let num_phases = 256;
-        let taps_per_phase = 17; // 奇数タップ（線形位相）
+        // DEBUG: 固定17に戻して切り分け
+        let taps_per_phase = 17;
         let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
 
         // source 側正規化周波数（Nyquist=0.5）
@@ -246,5 +246,47 @@ mod tests {
             .sqrt();
 
         assert!(rmse < 1e-4, "Chunked output diverged from whole output: rmse={}", rmse);
+    }
+
+    #[test]
+    fn test_high_ratio_downsampling_preserves_frequency() {
+        // WFM 復調後の 200kHz → 48kHz ダウンサンプリング (step ≈ 4.17)
+        test_resampling_sine_wave(200_000, 48_000, 1_000.0, 0.5);
+    }
+
+    #[test]
+    fn test_high_ratio_downsampling_stopband() {
+        // 200kHz → 48kHz ダウンサンプリング時、ナイキスト (24kHz) 超の信号が
+        // 十分に減衰されることを確認する。
+        let source_rate = 200_000u32;
+        let target_rate = 48_000u32;
+        let mut resampler = Resampler::new(source_rate, target_rate);
+
+        // 30kHz (ナイキスト超) の正弦波を入力
+        let len = 50_000;
+        let input: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                (2.0 * PI * 30_000.0 * t).sin()
+            })
+            .collect();
+
+        let mut output = Vec::new();
+        resampler.process(&input, &mut output);
+
+        // FIR 過渡を除いてパワーを計算
+        let skip = 100.min(output.len().saturating_sub(1));
+        let power = output[skip..]
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            / (output.len() - skip) as f32;
+
+        // 入力パワーは 0.5 (sin^2平均)。少なくとも -30dB (0.001) 以下に減衰。
+        assert!(
+            power < 0.001,
+            "Stopband signal not attenuated: power={}",
+            power
+        );
     }
 }

@@ -99,6 +99,11 @@ impl DecimationFilter {
         }
     }
 
+    /// FIR係数のDCゲイン（係数の総和）を返す
+    pub fn coeffs_dc_gain(&self) -> f32 {
+        self.coeffs.iter().sum()
+    }
+
     /// 既存FIR係数を band-pass へ更新する（タップ数は維持）
     pub fn set_fir_bandpass(&mut self, min_cutoff_norm: f32, max_cutoff_norm: f32) {
         self.coeffs = design_bandpass_coeffs(self.coeffs.len(), min_cutoff_norm, max_cutoff_norm);

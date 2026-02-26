@@ -11,7 +11,7 @@ use num_complex::Complex;
 use wasm_bindgen::prelude::*;
 
 use crate::dc::DcCanceller;
-use crate::demod::{AMDemodulator, Nco};
+use crate::demod::{AMDemodulator, FMDemodulator, Nco};
 use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
@@ -19,10 +19,48 @@ use crate::resample::Resampler;
 // 固定QのDCノッチ。2MHz時に等価ノッチ幅は約2kHz。
 const FIXED_DC_NOTCH_Q: f32 = 1_000.0;
 
+/// FM の最大周波数偏移 [Hz]。WFM（ワイドFM放送）想定。
+const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
+
+/// モード別の復調レート [Hz]
+const AM_DEMOD_RATE: f32 = 50_000.0;
+const FM_DEMOD_RATE: f32 = 200_000.0;
+
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
+}
+
+/// 復調モード
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DemodMode {
+    Am,
+    Fm,
+}
+
+impl DemodMode {
+    fn from_str(s: &str) -> Option<Self> {
+        match s.to_ascii_uppercase().as_str() {
+            "AM" => Some(Self::Am),
+            "FM" => Some(Self::Fm),
+            _ => None,
+        }
+    }
+
+    fn demod_rate(self) -> f32 {
+        match self {
+            Self::Am => AM_DEMOD_RATE,
+            Self::Fm => FM_DEMOD_RATE,
+        }
+    }
+}
+
+/// デシメーション用 FIR タップ数を factor から算出する。
+/// factor が大きいほど急峻なカットオフが必要で、タップ数を増やす。
+fn compute_fir_taps(factor: usize) -> usize {
+    let raw = (factor * 15).max(31).min(1001);
+    raw | 1 // 奇数保証
 }
 
 /// JS側から呼び出されるラジオのメインDSPレシーバ
@@ -36,16 +74,18 @@ pub struct Receiver {
     fft_use_processed: bool,
     fft_visible_start: usize,
     fft_visible_len: usize,
+    mode: DemodMode,
     nco: Nco,
     dc_canceller: DcCanceller,
     filter: DecimationFilter,
     am_demod: AMDemodulator,
+    fm_demod: FMDemodulator,
     resampler: Resampler,
     fft: FFT,
 
     // 中間バッファ（アロケーションを避けるため保持）
     baseband_buffer: Vec<Complex<f32>>,
-    am_buffer: Vec<f32>,
+    demod_buffer: Vec<f32>,
     audio_buffer: Vec<f32>,
     fft_buffer: Vec<f32>,
     fft_visible_buffer: Vec<f32>,
@@ -91,7 +131,7 @@ impl Receiver {
         sample_rate: f32,
         center_freq: f32,
         target_freq: f32,
-        decimation_factor: usize,
+        demod_mode: &str,
         output_sample_rate: f32,
         fft_size: usize,
         fft_visible_start_bin: usize,
@@ -103,15 +143,36 @@ impl Receiver {
     ) -> Self {
         console_error_panic_hook::set_once();
 
-        assert!(decimation_factor > 0, "decimation_factor must be > 0");
+        let mode = DemodMode::from_str(demod_mode).unwrap_or(DemodMode::Am);
+        let target_demod_rate = mode.demod_rate();
 
-        let offset_hz = target_freq - center_freq;
+        // rxSampleRate から demod_rate に整数デシメーションする factor を算出
+        let decimation_factor = (sample_rate / target_demod_rate).round().max(1.0) as usize;
         let decimated_sample_rate = sample_rate / decimation_factor as f32;
+
         let (if_min_hz, if_max_hz) = sanitize_if_band(if_min_hz, if_max_hz, decimated_sample_rate);
 
-        // 複素周波数変換後の IF チャンネルフィルタ（BPF = LPF(max) - LPF(min)）
+        let offset_hz = target_freq - center_freq;
+
+        // FIR タップ数を factor に基づいて算出
+        let fir_taps = compute_fir_taps(decimation_factor);
+
+        // DEBUG: 以前のパラメータに強制して切り分け
+        let (decimation_factor, fir_taps, decimated_sample_rate) = if mode == DemodMode::Am {
+            let f = 40usize;
+            (f, 601, sample_rate / f as f32)
+        } else {
+            (decimation_factor, fir_taps, decimated_sample_rate)
+        };
+
         let min_cutoff_norm = if_min_hz / sample_rate;
         let max_cutoff_norm = if_max_hz / sample_rate;
+
+        log(&format!(
+            "[Receiver::new] mode={:?} sr={} demod_rate={} factor={} dec_sr={} fir_taps={} if=[{},{}] cutoff_norm=[{},{}]",
+            mode, sample_rate, target_demod_rate, decimation_factor, decimated_sample_rate,
+            fir_taps, if_min_hz, if_max_hz, min_cutoff_norm, max_cutoff_norm
+        ));
 
         let resampler = Resampler::new(
             decimated_sample_rate.round() as u32,
@@ -142,14 +203,21 @@ impl Receiver {
             fft_use_processed,
             fft_visible_start,
             fft_visible_len,
+            mode,
             nco: Nco::new(-offset_hz, sample_rate),
             dc_canceller: DcCanceller::new(sample_rate, FIXED_DC_NOTCH_Q),
-            filter: DecimationFilter::new_fir_band(decimation_factor, 601, min_cutoff_norm, max_cutoff_norm),
+            filter: {
+                let f = DecimationFilter::new_fir_band(decimation_factor, fir_taps, min_cutoff_norm, max_cutoff_norm);
+                let dc_gain: f32 = f.coeffs_dc_gain();
+                log(&format!("[Filter] dc_gain={:.6} num_coeffs={}", dc_gain, fir_taps));
+                f
+            },
             am_demod: AMDemodulator::new(),
+            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, decimated_sample_rate),
             resampler,
             fft: FFT::new(fft_size, &window),
             baseband_buffer: Vec::with_capacity(131_072),
-            am_buffer: Vec::with_capacity(8_192),
+            demod_buffer: Vec::with_capacity(8_192),
             audio_buffer: Vec::with_capacity(8_192),
             fft_buffer: vec![0.0; fft_size],
             fft_visible_buffer: vec![-120.0; fft_visible_len],
@@ -191,7 +259,7 @@ impl Receiver {
     }
 
     /// 1ブロックのIQデータ(i8型)を受け取り、オーディオ信号とFFT結果を返す。
-    pub fn process_am(&mut self, iq_data: &[i8]) -> js_sys::Array {
+    pub fn process(&mut self, iq_data: &[i8]) -> js_sys::Array {
         let num_samples = iq_data.len() / 2;
         let fft_n = self.fft.get_n();
 
@@ -222,18 +290,39 @@ impl Receiver {
         // デシメーション (LPF + Downsampling)
         let decimated = self.filter.process(&self.baseband_buffer);
 
-        // AM復調
-        self.am_buffer.resize(decimated.len(), 0.0);
-        self.am_demod.demodulate(&decimated, &mut self.am_buffer);
+        // 復調（モードに応じて分岐）
+        self.demod_buffer.resize(decimated.len(), 0.0);
+        match self.mode {
+            DemodMode::Am => self.am_demod.demodulate(&decimated, &mut self.demod_buffer),
+            DemodMode::Fm => self.fm_demod.demodulate(&decimated, &mut self.demod_buffer),
+        }
 
-        // リサンプリング (e.g. 50kHz -> 44.1kHz or 48kHz)
+        // リサンプリング (demod_rate -> audioCtx.sampleRate)
         self.audio_buffer.clear();
         self.audio_buffer.reserve(
-            ((self.am_buffer.len() as f32 / self.resampler.source_rate as f32)
+            ((self.demod_buffer.len() as f32 / self.resampler.source_rate as f32)
                 * self.resampler.target_rate as f32
                 * 1.5) as usize,
         );
-        self.resampler.process(&self.am_buffer, &mut self.audio_buffer);
+        self.resampler.process(&self.demod_buffer, &mut self.audio_buffer);
+
+        // デバッグログ（最初の3ブロックのみ）
+        {
+            static LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let count = LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count < 3 {
+                let bb_peak = self.baseband_buffer.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
+                let dec_peak = decimated.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
+                let demod_peak = self.demod_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                let audio_peak = self.audio_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                log(&format!(
+                    "[process#{}] samples: iq={} bb={} dec={} demod={} audio={} | peaks: bb={:.4} dec={:.6} demod={:.4} audio={:.4}",
+                    count, iq_data.len(), self.baseband_buffer.len(), decimated.len(),
+                    self.demod_buffer.len(), self.audio_buffer.len(),
+                    bb_peak, dec_peak, demod_peak, audio_peak
+                ));
+            }
+        }
 
         // FFT (iq_data の先頭 fft_size * 2 要素を使用)
         self.fft_buffer.fill(-120.0);
