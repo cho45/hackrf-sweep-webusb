@@ -90,6 +90,8 @@
         <div>process peak: {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
         <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
         <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
+        <div>stereo: {{ dspPerf.stereoLocked ? 'LOCK' : 'MONO' }} / blend {{ fmtNum(dspPerf.stereoBlend, 2) }}</div>
+        <div>pilot: {{ fmtNum(dspPerf.pilotLevel, 3) }} / mono fallback: {{ fmtNum(dspPerf.monoFallbackCount, 0) }}</div>
 
         <div style="margin-top: 8px;"><b>Draw</b></div>
         <div>fps: {{ fmtNum(drawPerf.fps, 1) }}</div>
@@ -251,6 +253,11 @@ type DspPerfStats = {
   dspProcessMsPeak: number;
   // 長期供給不足の判定
   audioOutHzLong: number;
+  // FMステレオ復調状態（AM時はゼロ値）
+  pilotLevel: number;
+  stereoBlend: number;
+  stereoLocked: boolean;
+  monoFallbackCount: number;
 };
 const keypadField = ref<KeypadField | null>(null);
 const keypadOpenToken = ref(0);
@@ -311,6 +318,11 @@ const dspPerf = reactive({
   droppedIqBlocksCount: 0,
   // 長期供給不足監視
   audioOutHzLong: 0,
+  // FMステレオ復調状態
+  pilotLevel: 0,
+  stereoBlend: 0,
+  stereoLocked: false,
+  monoFallbackCount: 0,
 });
 const drawPerf = reactive({
   fps: 0,
@@ -516,7 +528,7 @@ const initAudio = async () => {
     audioNode = new AudioWorkletNode(audioCtx, 'audio-stream-processor', {
       numberOfInputs: 0,
       numberOfOutputs: 1,
-      outputChannelCount: [1],
+      outputChannelCount: [2],
     });
     audioNode.port.onmessage = (event: MessageEvent) => {
       const msg = event.data;
@@ -681,6 +693,10 @@ const start = async () => {
       dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
       dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
       dspPerf.audioOutHzLong = perf.audioOutHzLong;
+      dspPerf.pilotLevel = perf.pilotLevel;
+      dspPerf.stereoBlend = perf.stereoBlend;
+      dspPerf.stereoLocked = perf.stereoLocked;
+      dspPerf.monoFallbackCount = perf.monoFallbackCount;
     }
   });
 

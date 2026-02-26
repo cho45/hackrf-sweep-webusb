@@ -138,4 +138,49 @@ describe("audio-stream-processor", () => {
     expect(stats).toBeDefined();
     expect((stats?.droppedSamplesCount as number) > 0).toBe(true);
   });
+
+  it("plays interleaved stereo input to separate channels", async () => {
+    const mod = await import("./audio-stream-processor");
+    const processor = new mod.AudioStreamProcessor() as unknown as {
+      port: {
+        onmessage: ((event: MessageEvent) => void) | null;
+        postMessage: ReturnType<typeof vi.fn>;
+      };
+      process: (inputs: Float32Array[][], outputs: Float32Array[][]) => boolean;
+    };
+
+    const inputPort = {
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      start: vi.fn(),
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as MessagePort;
+    processor.port.onmessage?.(
+      new MessageEvent("message", {
+        data: { type: "attach-input-port", port: inputPort },
+      }),
+    );
+
+    const left = new Float32Array(128);
+    const right = new Float32Array(128);
+    const interleaved = new Float32Array(256);
+    for (let i = 0; i < 128; i += 1) {
+      interleaved[i * 2] = i / 128;
+      interleaved[i * 2 + 1] = -(i / 128);
+    }
+
+    (inputPort.onmessage as ((event: MessageEvent) => void) | null)?.(
+      new MessageEvent("message", {
+        data: { type: "push", channels: 2, data: interleaved },
+      }),
+    );
+
+    nowSec = 0.2;
+    processor.process([], [[left, right]]);
+
+    expect(left[0]).toBeCloseTo(0, 6);
+    expect(right[0]).toBeCloseTo(0, 6);
+    expect(left[127]).toBeCloseTo(127 / 128, 6);
+    expect(right[127]).toBeCloseTo(-(127 / 128), 6);
+  });
 });

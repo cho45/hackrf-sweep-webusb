@@ -9,7 +9,7 @@ use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
 use crate::{
     build_decimation_plan, compute_fir_taps, sanitize_if_band, AM_AUDIO_CUTOFF_HZ, DemodMode,
-    FM_AUDIO_CUTOFF_HZ, FM_DEEMPHASIS_TAU_US, FM_MAX_DEVIATION_HZ,
+    FM_AUDIO_CUTOFF_HZ, FM_MAX_DEVIATION_HZ,
 };
 
 const IQ_BYTES_PER_BLOCK: usize = 262_144;
@@ -196,11 +196,7 @@ fn run_case(case: BenchCase) {
         if_max_hz / plan.coarse_stage_rate,
     );
     let mut am = AMDemodulator::new();
-    let mut fm = FMDemodulator::new_with_deemphasis(
-        FM_MAX_DEVIATION_HZ,
-        plan.demod_sample_rate,
-        Some(FM_DEEMPHASIS_TAU_US),
-    );
+    let mut fm = FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate);
     let audio_cutoff_hz = match case.mode {
         DemodMode::Am => AM_AUDIO_CUTOFF_HZ,
         DemodMode::Fm => FM_AUDIO_CUTOFF_HZ,

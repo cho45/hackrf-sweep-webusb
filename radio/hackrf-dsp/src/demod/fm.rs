@@ -2,7 +2,7 @@ use num_complex::Complex;
 
 /// FM 復調器（位相差分法 / Discriminator）
 ///
-/// 瞬時周波数偏移を位相差分から求め、音声信号を復元する。
+/// 瞬時周波数偏移を位相差分から求め、MPX信号を復元する。
 ///
 /// # アルゴリズム
 /// ```text
@@ -10,61 +10,35 @@ use num_complex::Complex;
 /// Δφ[n] = atan2(Im(d[n]), Re(d[n]))   // [-π, +π] rad
 /// output[n] = Δφ[n] * gain
 /// ```
-/// ここで `gain = 1 / (2π * max_deviation_hz / sample_rate_hz)`
-/// とすることで出力を [-1.0, +1.0] に正規化する（最大偏移時に ±1.0）。
+/// ここで `gain = 1 / (2π * max_deviation_hz / sample_rate_hz)`。
+///
+/// 注: 出力は mono 音声ではなく FM baseband (MPX) を想定する。
 pub struct FMDemodulator {
     prev: Complex<f32>,
     /// 出力正規化ゲイン: 1 / (2π * Δf_max / fs)
     gain: f32,
-    deemphasis_alpha: Option<f32>,
-    deemphasis_state: f32,
 }
 
 impl FMDemodulator {
-    /// `deemphasis_tau_us` を指定すると1次IIRでFM de-emphasisを適用する。
-    pub fn new_with_deemphasis(
-        max_deviation_hz: f32,
-        sample_rate_hz: f32,
-        deemphasis_tau_us: Option<f32>,
-    ) -> Self {
+    /// - `max_deviation_hz`: 最大周波数偏移 [Hz]（WFMなら75_000.0など）
+    /// - `sample_rate_hz`: 入力IQのサンプルレート [Hz]（デシメーション後の値）
+    pub fn new(max_deviation_hz: f32, sample_rate_hz: f32) -> Self {
         assert!(max_deviation_hz > 0.0, "max_deviation_hz must be > 0");
         assert!(sample_rate_hz > 0.0, "sample_rate_hz must be > 0");
         let gain = sample_rate_hz / (2.0 * std::f32::consts::PI * max_deviation_hz);
-        let deemphasis_alpha = deemphasis_tau_us.and_then(|tau_us| {
-            if tau_us <= 0.0 {
-                return None;
-            }
-            let tau = tau_us * 1e-6;
-            let dt = 1.0 / sample_rate_hz;
-            Some(dt / (tau + dt))
-        });
         Self {
             prev: Complex::new(1.0, 0.0),
             gain,
-            deemphasis_alpha,
-            deemphasis_state: 0.0,
         }
     }
 
-    /// 複素IQサンプル列を受け取り、FM復調した音声を output に書き込む。
-    /// - input: デシメーション済み複素ベースバンド IQ
-    /// - output: 復調音声 f32（最大偏移で概ね ±1.0）
+    /// 複素IQサンプル列を受け取り、FM復調したMPX信号を output に書き込む。
     pub fn demodulate(&mut self, input: &[Complex<f32>], output: &mut [f32]) {
         assert_eq!(input.len(), output.len());
 
         for (i, &s) in input.iter().enumerate() {
-            // conj(prev) * s = |prev||s| * e^(j*Δφ)
-            // normが0の場合は無音とする（除算回避）
             let d = self.prev.conj() * s;
-            // atan2 は O(1) で [-π, +π] に収まるため位相アンラップ不要
-            let raw = d.im.atan2(d.re) * self.gain;
-            output[i] = if let Some(alpha) = self.deemphasis_alpha {
-                // y[n] = y[n-1] + alpha * (x[n] - y[n-1])
-                self.deemphasis_state += alpha * (raw - self.deemphasis_state);
-                self.deemphasis_state
-            } else {
-                raw
-            };
+            output[i] = d.im.atan2(d.re) * self.gain;
             self.prev = s;
         }
     }
@@ -98,32 +72,23 @@ mod tests {
         out
     }
 
-    /// 純粋な複素正弦波（一定周波数偏移）を入力すると、
-    /// 出力が一定値（= 偏移量を正規化した値）に収束することを確認する。
-    ///
-    /// IQ が e^(j*2π*f*t) の場合、位相差分 Δφ = 2π*f/fs [rad/sample] = 一定。
-    /// ゆえに出力 = f / max_deviation（最大偏移で ±1.0）。
     #[test]
     fn test_fm_constant_deviation() {
         let sample_rate = 200_000.0_f32;
         let max_deviation = 75_000.0_f32;
-        let test_freq = 10_000.0_f32; // 10kHz 偏移 = max_dev の 2/15
+        let test_freq = 10_000.0_f32;
 
-        let mut demod = FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
+        let mut demod = FMDemodulator::new(max_deviation, sample_rate);
         let input = make_iq_tone(test_freq, sample_rate, 10_000);
         let mut output = vec![0.0f32; input.len()];
         demod.demodulate(&input, &mut output);
 
-        // 期待値: test_freq / max_deviation
         let expected = test_freq / max_deviation;
 
-        // 最初の1サンプルは prev=1+0j の初期値による誤差があるため、2サンプル目以降で評価
         let tail = &output[1..];
         let mean = tail.iter().copied().sum::<f32>() / tail.len() as f32;
         let max_err = tail.iter().map(|&v| (v - expected).abs()).fold(0.0_f32, f32::max);
 
-        // f32 の cos/sin 生成誤差と atan2 精度の組み合わせで ~1e-4 程度の誤差が生じる。
-        // 音声用途では 0.15% の誤差は無視できるため 2e-4 を許容値とする。
         assert!(
             max_err < 2e-4,
             "FM constant deviation: expected={}, mean={}, max_err={}",
@@ -133,15 +98,12 @@ mod tests {
         );
     }
 
-    /// 0偏移（単純なDC複素信号）を入力すると出力は0になる。
-    /// ただし初期サンプルは prev の影響を受けるため、2サンプル目以降で判断。
     #[test]
     fn test_fm_zero_deviation() {
         let sample_rate = 200_000.0_f32;
         let max_deviation = 75_000.0_f32;
 
-        let mut demod = FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
-        // DC信号（位相変化なし）
+        let mut demod = FMDemodulator::new(max_deviation, sample_rate);
         let input: Vec<Complex<f32>> = (0..5_000).map(|_| Complex::new(1.0, 0.0)).collect();
         let mut output = vec![0.0f32; input.len()];
         demod.demodulate(&input, &mut output);
@@ -155,25 +117,22 @@ mod tests {
         );
     }
 
-    /// チャンク分割の前後で出力が一致することを確認（ステート管理の正確性）。
     #[test]
     fn test_fm_chunk_invariance() {
         let sample_rate = 200_000.0_f32;
         let max_deviation = 75_000.0_f32;
 
-        let mut demod_whole =
-            FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
-        let mut demod_chunks =
-            FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
+        let mut demod_whole = FMDemodulator::new(max_deviation, sample_rate);
+        let mut demod_chunks = FMDemodulator::new(max_deviation, sample_rate);
 
-        // 複数の偏移周波数を混ぜた複雑な信号
         let len = 131_072 * 2 + 513;
         let mut input = Vec::with_capacity(len);
         for i in 0..len {
             let t = i as f32 / sample_rate;
-            // FMの瞬時位相: 搬送波 + 正弦波変調
             let phi = 2.0 * std::f32::consts::PI
-                * (50_000.0 * t + (max_deviation / 1_000.0) * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin());
+                * (50_000.0 * t
+                    + (max_deviation / 1_000.0)
+                        * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin());
             input.push(Complex::new(phi.cos(), phi.sin()));
         }
 
@@ -196,106 +155,26 @@ mod tests {
         );
     }
 
-    /// マイナス周波数偏移（負方向の螺旋）でも正しく負値を出力する。
     #[test]
     fn test_fm_negative_deviation() {
         let sample_rate = 200_000.0_f32;
         let max_deviation = 75_000.0_f32;
-        let test_freq = -10_000.0_f32; // 負の偏移
+        let test_freq = -10_000.0_f32;
 
-        let mut demod = FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
+        let mut demod = FMDemodulator::new(max_deviation, sample_rate);
         let input = make_iq_tone(test_freq, sample_rate, 5_000);
         let mut output = vec![0.0f32; input.len()];
         demod.demodulate(&input, &mut output);
 
-        let expected = test_freq / max_deviation; // 負値
+        let expected = test_freq / max_deviation;
         let tail = &output[1..];
         let max_err = tail.iter().map(|&v| (v - expected).abs()).fold(0.0_f32, f32::max);
 
-        // f32 精度限界（~1e-4）を考慮した許容値
         assert!(
             max_err < 2e-4,
             "FM negative deviation: expected={}, max_err={}",
             expected,
             max_err
-        );
-    }
-
-    fn make_iq_from_normalized_demod(
-        demod_signal: &[f32],
-        max_deviation_hz: f32,
-        sample_rate_hz: f32,
-    ) -> Vec<Complex<f32>> {
-        let k = 2.0 * std::f32::consts::PI * max_deviation_hz / sample_rate_hz;
-        let mut phase = 0.0f32;
-        let mut out = Vec::with_capacity(demod_signal.len());
-        for &x in demod_signal {
-            phase += k * x;
-            out.push(Complex::new(phase.cos(), phase.sin()));
-        }
-        out
-    }
-
-    fn rms_tail(samples: &[f32], skip: usize) -> f32 {
-        let tail = &samples[skip.min(samples.len())..];
-        if tail.is_empty() {
-            return 0.0;
-        }
-        (tail.iter().map(|v| v * v).sum::<f32>() / tail.len() as f32).sqrt()
-    }
-
-    #[test]
-    fn test_fm_deemphasis_attenuates_high_audio_more_than_low_audio() {
-        let sample_rate = 200_000.0f32;
-        let max_deviation = 75_000.0f32;
-        let tau_us = 50.0f32;
-        let len = 80_000usize;
-        let amp = 0.5f32;
-
-        let make_signal = |tone_hz: f32| {
-            (0..len)
-                .map(|i| {
-                    let t = i as f32 / sample_rate;
-                    amp * (2.0 * std::f32::consts::PI * tone_hz * t).sin()
-                })
-                .collect::<Vec<f32>>()
-        };
-
-        let low_in = make_signal(1_000.0);
-        let high_in = make_signal(10_000.0);
-        let low_iq = make_iq_from_normalized_demod(&low_in, max_deviation, sample_rate);
-        let high_iq = make_iq_from_normalized_demod(&high_in, max_deviation, sample_rate);
-
-        let mut demod_flat = FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, None);
-        let mut demod_deemph =
-            FMDemodulator::new_with_deemphasis(max_deviation, sample_rate, Some(tau_us));
-
-        let mut low_flat = vec![0.0f32; len];
-        let mut high_flat = vec![0.0f32; len];
-        demod_flat.demodulate(&low_iq, &mut low_flat);
-        demod_flat.prev = Complex::new(1.0, 0.0);
-        demod_flat.demodulate(&high_iq, &mut high_flat);
-
-        let mut low_de = vec![0.0f32; len];
-        let mut high_de = vec![0.0f32; len];
-        demod_deemph.demodulate(&low_iq, &mut low_de);
-        demod_deemph.prev = Complex::new(1.0, 0.0);
-        demod_deemph.deemphasis_state = 0.0;
-        demod_deemph.demodulate(&high_iq, &mut high_de);
-
-        let skip = 4_000usize;
-        let low_ratio = rms_tail(&low_de, skip) / rms_tail(&low_flat, skip).max(1e-9);
-        let high_ratio = rms_tail(&high_de, skip) / rms_tail(&high_flat, skip).max(1e-9);
-
-        assert!(
-            low_ratio > 0.8,
-            "Low-audio tone should be mostly preserved by deemphasis: ratio={}",
-            low_ratio
-        );
-        assert!(
-            high_ratio < 0.5,
-            "High-audio tone should be attenuated by deemphasis: ratio={}",
-            high_ratio
         );
     }
 }

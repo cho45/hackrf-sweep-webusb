@@ -1,10 +1,11 @@
 type QueueChunk = {
   data: Float32Array;
-  readPos: number;
+  channels: 1 | 2;
+  readFrame: number;
 };
 
 type InputMessage =
-  | { type: "push"; data: Float32Array }
+  | { type: "push"; data: Float32Array; channels?: number }
   | { type: "reset" };
 
 type WorkletControlMessage = {
@@ -41,7 +42,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private inputPort: MessagePort | null = null;
 
-  private bufferedSamples = 0;
+  private bufferedFrames = 0;
 
   private started = false;
 
@@ -128,6 +129,9 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       const { data } = msg;
       if (!(data instanceof Float32Array) || data.length === 0) return;
 
+      const channels = msg.channels === 2 ? 2 : 1;
+      if (data.length % channels !== 0) return;
+
       const nowSec = readCurrentTime();
       if (this.lastPushAtSec >= 0) {
         const gapSec = Math.max(0, nowSec - this.lastPushAtSec);
@@ -137,18 +141,19 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       }
       this.lastPushAtSec = nowSec;
 
-      this.queue.push({ data, readPos: 0 });
-      this.bufferedSamples += data.length;
+      const frames = data.length / channels;
+      this.queue.push({ data, channels, readFrame: 0 });
+      this.bufferedFrames += frames;
 
-      if (this.bufferedSamples > this.maxBufferedSamples) {
-        this.dropOldSamples(this.bufferedSamples - this.targetBufferedSamples);
+      if (this.bufferedFrames > this.maxBufferedSamples) {
+        this.dropOldFrames(this.bufferedFrames - this.targetBufferedSamples);
       }
       return;
     }
 
     if (msg.type === "reset") {
       this.queue = [];
-      this.bufferedSamples = 0;
+      this.bufferedFrames = 0;
       this.started = false;
       this.lastSample = 0.0;
       this.droppedSamples = 0;
@@ -191,31 +196,33 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
     this.lastBufferGrowAt = nowSec;
   }
 
-  private dropOldSamples(samplesToDrop: number): void {
-    let remaining = samplesToDrop;
+  private dropOldFrames(framesToDrop: number): void {
+    let remaining = framesToDrop;
     while (remaining > 0 && this.queue.length > 0) {
       const head = this.queue[0];
       if (!head) break;
-      const available = head.data.length - head.readPos;
+      const available = head.data.length / head.channels - head.readFrame;
       if (available <= remaining) {
         remaining -= available;
-        this.bufferedSamples -= available;
-        this.droppedSamples += available;
+        this.bufferedFrames -= available;
+        this.droppedSamples += available * head.channels;
         this.queue.shift();
       } else {
-        head.readPos += remaining;
-        this.bufferedSamples -= remaining;
-        this.droppedSamples += remaining;
+        head.readFrame += remaining;
+        this.bufferedFrames -= remaining;
+        this.droppedSamples += remaining * head.channels;
         remaining = 0;
       }
     }
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
-    const out = outputs[0]?.[0];
-    if (!out) return true;
+    const outputBus = outputs[0];
+    const outL = outputBus?.[0];
+    if (!outL) return true;
+    const outR = outputBus?.[1] ?? outL;
 
-    const bufferLength = out.length;
+    const bufferLength = outL.length;
     if (this.bufferLength !== bufferLength) {
       this.bufferLength = bufferLength;
       this.maxSoftUnderrunBlocks = Math.max(
@@ -224,10 +231,13 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       );
     }
 
-    out.fill(0);
+    outL.fill(0);
+    if (outR !== outL) {
+      outR.fill(0);
+    }
 
     if (!this.started) {
-      if (this.bufferedSamples < this.minStartSamples) {
+      if (this.bufferedFrames < this.minStartSamples) {
         this.postStatsIfNeeded();
         return true;
       }
@@ -238,19 +248,36 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
     while (written < bufferLength && this.queue.length > 0) {
       const head = this.queue[0];
       if (!head) break;
-      const available = head.data.length - head.readPos;
-      const take = Math.min(available, bufferLength - written);
-      out.set(head.data.subarray(head.readPos, head.readPos + take), written);
-      head.readPos += take;
-      written += take;
-      this.bufferedSamples -= take;
-      if (head.readPos >= head.data.length) {
+
+      const availableFrames = head.data.length / head.channels - head.readFrame;
+      const takeFrames = Math.min(availableFrames, bufferLength - written);
+
+      if (head.channels === 1) {
+        const src = head.readFrame;
+        for (let i = 0; i < takeFrames; i += 1) {
+          const v = head.data[src + i] ?? 0;
+          outL[written + i] = v;
+          outR[written + i] = v;
+        }
+      } else {
+        const src = head.readFrame * 2;
+        for (let i = 0; i < takeFrames; i += 1) {
+          const base = src + i * 2;
+          outL[written + i] = head.data[base] ?? 0;
+          outR[written + i] = head.data[base + 1] ?? 0;
+        }
+      }
+
+      head.readFrame += takeFrames;
+      written += takeFrames;
+      this.bufferedFrames -= takeFrames;
+      if (head.readFrame >= head.data.length / head.channels) {
         this.queue.shift();
       }
     }
 
     if (written > 0) {
-      this.lastSample = out[written - 1] ?? this.lastSample;
+      this.lastSample = outL[written - 1] ?? this.lastSample;
       this.consecutiveEmptyBlocks = 0;
       this.inHardUnderrun = false;
     }
@@ -260,7 +287,9 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       this.growBufferOnUnderrun();
       if (written === 0) {
         this.consecutiveEmptyBlocks += 1;
-        out.fill(this.inHardUnderrun ? 0.0 : this.lastSample, written);
+        const fill = this.inHardUnderrun ? 0.0 : this.lastSample;
+        outL.fill(fill, written);
+        outR.fill(fill, written);
         if (this.consecutiveEmptyBlocks > this.maxSoftUnderrunBlocks) {
           if (!this.inHardUnderrun) {
             this.hardUnderrunCount += 1;
@@ -268,9 +297,10 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
           }
         }
       } else {
-        out.fill(this.lastSample, written);
+        outL.fill(this.lastSample, written);
+        outR.fill(this.lastSample, written);
       }
-      if (this.bufferedSamples < this.lowWaterSamples) {
+      if (this.bufferedFrames < this.lowWaterSamples) {
         this.started = false;
       }
     }
@@ -286,7 +316,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
     this.lastStatsAt = nowSec;
     const msg: StatsMessage = {
       type: "stats",
-      bufferedMs: (this.bufferedSamples / this.sampleRateHz) * 1000,
+      bufferedMs: (this.bufferedFrames / this.sampleRateHz) * 1000,
       underrunCount: this.underrunCount,
       droppedSamplesCount: this.droppedSamples,
       inputGapMsPeak: this.pushIntervalPeakSec * 1000,

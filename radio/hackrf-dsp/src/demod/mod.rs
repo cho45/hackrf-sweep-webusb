@@ -4,9 +4,11 @@ use std::arch::wasm32::{f32x4, f32x4_add, f32x4_mul, f32x4_sub, i32x4_shuffle, v
 
 pub mod am;
 pub mod fm;
+pub mod fm_stereo;
 
 pub use am::AMDemodulator;
 pub use fm::FMDemodulator;
+pub use fm_stereo::{FMStereoDecoder, FMStereoStats};
 
 /// Number Controlled Oscillator (NCO)
 /// 複素ベースバンド変換のための内部発振器

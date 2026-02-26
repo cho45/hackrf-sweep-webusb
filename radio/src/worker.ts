@@ -12,6 +12,11 @@ type PerfStats = {
 	dspProcessMsPeak: number;
 	// 長期の供給不足判定（短窓の揺れは見ない）
 	audioOutHzLong: number;
+	// FMステレオ復調状態（AM時はゼロ値）
+	pilotLevel: number;
+	stereoBlend: number;
+	stereoLocked: boolean;
+	monoFallbackCount: number;
 };
 
 type WasmInitFn = () => Promise<any>;
@@ -37,6 +42,8 @@ type ReceiverCtor = new (
 	audio_output_capacity: () => number;
 	fft_output_capacity: () => number;
 	process_iq_len: (iqLen: number) => number;
+	audio_output_channels: () => number;
+	get_stats: () => unknown;
 	free: () => void;
 	set_target_freq: (centerFreq: number, targetFreq: number) => void;
 	set_if_band: (minHz: number, maxHz: number) => void;
@@ -254,11 +261,12 @@ export class RadioBackend {
 		const coarseFactor = Math.max(1, Math.round(options.sampleRate / 1_000_000));
 		const coarseRate = options.sampleRate / coarseFactor;
 		const demodFactor = Math.max(1, Math.round(coarseRate / demodRate));
+		const audioChannels = Math.max(1, Math.min(2, this.receiver.audio_output_channels()));
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
 		const audioCapacity = Math.max(
 			1024,
-			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2)
+			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2 * audioChannels)
 		);
 		const fftCapacity = options.fftVisibleBins;
 		await this.receiver.alloc_io_buffers(
@@ -308,7 +316,28 @@ export class RadioBackend {
 		let droppedIqBlocksCount = 0;
 		let blockIntervalMsPeak = 0;
 		let dspProcessMsPeak = 0;
-		let audioSamplesOutTotal = 0;
+		let audioFramesOutTotal = 0;
+
+		const readNum = (value: unknown): number | undefined => {
+			return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+		};
+		const readBool = (value: unknown): boolean | undefined => {
+			return typeof value === "boolean" ? value : undefined;
+		};
+		const readStatNum = (src: Record<string, unknown>, ...keys: string[]): number => {
+			for (const k of keys) {
+				const v = readNum(src[k]);
+				if (v !== undefined) return v;
+			}
+			return 0;
+		};
+		const readStatBool = (src: Record<string, unknown>, ...keys: string[]): boolean => {
+			for (const k of keys) {
+				const v = readBool(src[k]);
+				if (v !== undefined) return v;
+			}
+			return false;
+		};
 
 		const snapshotPerf = (now: number): PerfStats | undefined => {
 			if (!perfStarted) return undefined;
@@ -316,11 +345,20 @@ export class RadioBackend {
 			if (windowMs < 1000 || blockCount === 0) return undefined;
 
 			const totalSec = Math.max(0.000001, (now - perfTotalStart) / 1000);
+			const demodStatsRaw = this.receiver?.get_stats?.();
+			const demodStats =
+				demodStatsRaw && typeof demodStatsRaw === "object"
+					? (demodStatsRaw as Record<string, unknown>)
+					: {};
 			const stats: PerfStats = {
 				droppedIqBlocksCount,
 				blockIntervalMsPeak,
 				dspProcessMsPeak,
-				audioOutHzLong: audioSamplesOutTotal / totalSec,
+				audioOutHzLong: audioFramesOutTotal / totalSec,
+				pilotLevel: readStatNum(demodStats, "pilotLevel", "pilot_level"),
+				stereoBlend: readStatNum(demodStats, "stereoBlend", "stereo_blend"),
+				stereoLocked: readStatBool(demodStats, "stereoLocked", "stereo_locked"),
+				monoFallbackCount: readStatNum(demodStats, "monoFallbackCount", "mono_fallback_count"),
 			};
 
 			perfWindowStart = now;
@@ -372,13 +410,13 @@ export class RadioBackend {
 						const audioChunk = new Float32Array(audioLen);
 						audioChunk.set(audioReadView.subarray(0, audioLen));
 						this.audioPort.postMessage(
-							{ type: "push", data: audioChunk },
+							{ type: "push", channels: audioChannels, data: audioChunk },
 							[audioChunk.buffer]
 						);
 					}
 				}
 				fftScratch.set(fftReadView);
-				audioSamplesOutTotal += audioLen;
+				audioFramesOutTotal += Math.floor(audioLen / audioChannels);
 				const perf = snapshotPerf(performance.now());
 				onData(fftScratch, perf);
 			}

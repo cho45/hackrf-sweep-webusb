@@ -17,7 +17,7 @@ use std::arch::wasm32::{
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
 
-use crate::demod::{AMDemodulator, FMDemodulator, Nco};
+use crate::demod::{AMDemodulator, FMDemodulator, FMStereoDecoder, FMStereoStats, Nco};
 use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
@@ -116,20 +116,57 @@ pub struct Receiver {
     demod_filter: DecimationFilter,
     am_demod: AMDemodulator,
     fm_demod: FMDemodulator,
+    fm_stereo: FMStereoDecoder,
     resampler: Resampler,
+    resampler_right: Resampler,
     fft: FFT,
 
     // 中間バッファ（アロケーションを避けるため保持）
     baseband_buffer: Vec<Complex<f32>>,
     coarse_buffer: Vec<Complex<f32>>,
     demod_iq_buffer: Vec<Complex<f32>>,
-    demod_buffer: Vec<f32>,
+    demod_buffer: Vec<f32>, // AM: baseband audio / FM: MPX
+    stereo_left_buffer: Vec<f32>,
+    stereo_right_buffer: Vec<f32>,
+    audio_left_resampled: Vec<f32>,
+    audio_right_resampled: Vec<f32>,
     audio_buffer: Vec<f32>,
     fft_buffer: Vec<f32>,
     fft_visible_buffer: Vec<f32>,
     io_iq_buffer: Vec<i8>,
     io_audio_buffer: Vec<f32>,
     io_fft_buffer: Vec<f32>,
+}
+
+#[wasm_bindgen]
+pub struct ReceiverStats {
+    pilot_level: f32,
+    stereo_blend: f32,
+    stereo_locked: bool,
+    mono_fallback_count: u32,
+}
+
+#[wasm_bindgen]
+impl ReceiverStats {
+    #[wasm_bindgen(getter)]
+    pub fn pilot_level(&self) -> f32 {
+        self.pilot_level
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stereo_blend(&self) -> f32 {
+        self.stereo_blend
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn stereo_locked(&self) -> bool {
+        self.stereo_locked
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn mono_fallback_count(&self) -> u32 {
+        self.mono_fallback_count
+    }
 }
 
 fn sanitize_if_band(min_hz: f32, max_hz: f32, demod_sample_rate: f32) -> (f32, f32) {
@@ -266,6 +303,11 @@ impl Receiver {
             output_sample_rate.round() as u32,
             Some(audio_cutoff_hz),
         );
+        let resampler_right = Resampler::new_with_cutoff(
+            plan.demod_sample_rate.round() as u32,
+            output_sample_rate.round() as u32,
+            Some(audio_cutoff_hz),
+        );
 
         // FFT窓関数 (Hann窓)
         let mut window = vec![0.0f32; fft_size];
@@ -322,17 +364,19 @@ impl Receiver {
                 f
             },
             am_demod: AMDemodulator::new(),
-            fm_demod: FMDemodulator::new_with_deemphasis(
-                FM_MAX_DEVIATION_HZ,
-                plan.demod_sample_rate,
-                Some(FM_DEEMPHASIS_TAU_US),
-            ),
+            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate),
+            fm_stereo: FMStereoDecoder::new(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US)),
             resampler,
+            resampler_right,
             fft: FFT::new(fft_size, &window),
             baseband_buffer: Vec::with_capacity(131_072),
             coarse_buffer: Vec::with_capacity(131_072),
             demod_iq_buffer: Vec::with_capacity(131_072),
             demod_buffer: Vec::with_capacity(8_192),
+            stereo_left_buffer: Vec::with_capacity(8_192),
+            stereo_right_buffer: Vec::with_capacity(8_192),
+            audio_left_resampled: Vec::with_capacity(8_192),
+            audio_right_resampled: Vec::with_capacity(8_192),
             audio_buffer: Vec::with_capacity(8_192),
             fft_buffer: vec![0.0; fft_size],
             fft_visible_buffer: vec![-120.0; fft_visible_len],
@@ -401,6 +445,10 @@ impl Receiver {
         self.coarse_buffer.reserve(max_coarse);
         self.demod_iq_buffer.reserve(max_demod);
         self.demod_buffer.reserve(max_demod);
+        self.stereo_left_buffer.reserve(max_demod);
+        self.stereo_right_buffer.reserve(max_demod);
+        self.audio_left_resampled.reserve(max_audio_samples / 2 + 2);
+        self.audio_right_resampled.reserve(max_audio_samples / 2 + 2);
         self.audio_buffer.reserve(max_audio_samples);
         Ok(())
     }
@@ -436,6 +484,27 @@ impl Receiver {
 
     pub fn fft_output_capacity(&self) -> usize {
         self.io_fft_buffer.len()
+    }
+
+    pub fn audio_output_channels(&self) -> usize {
+        match self.mode {
+            DemodMode::Am => 1,
+            DemodMode::Fm => 2,
+        }
+    }
+
+    pub fn get_stats(&self) -> ReceiverStats {
+        let stereo = if self.mode == DemodMode::Fm {
+            self.fm_stereo.stats()
+        } else {
+            FMStereoStats::default()
+        };
+        ReceiverStats {
+            pilot_level: stereo.pilot_level,
+            stereo_blend: stereo.stereo_blend,
+            stereo_locked: stereo.stereo_locked,
+            mono_fallback_count: stereo.mono_fallback_count,
+        }
     }
 
     /// `alloc_io_buffers` で確保したI/Qバッファ先頭 `iq_len` バイトを入力として処理する。
@@ -564,15 +633,45 @@ impl Receiver {
                 .demodulate(&self.demod_iq_buffer, &mut self.demod_buffer),
         }
 
-        // リサンプリング (demod_rate -> audioCtx.sampleRate)
-        self.audio_buffer.clear();
-        self.audio_buffer.reserve(
-            ((self.demod_buffer.len() as f32 / self.resampler.source_rate as f32)
-                * self.resampler.target_rate as f32
-                * 1.5) as usize,
-        );
-        self.resampler
-            .process(&self.demod_buffer, &mut self.audio_buffer);
+        match self.mode {
+            DemodMode::Am => {
+                // リサンプリング (demod_rate -> audioCtx.sampleRate)
+                self.audio_buffer.clear();
+                self.audio_buffer.reserve(
+                    ((self.demod_buffer.len() as f32 / self.resampler.source_rate as f32)
+                        * self.resampler.target_rate as f32
+                        * 1.5) as usize,
+                );
+                self.resampler
+                    .process(&self.demod_buffer, &mut self.audio_buffer);
+            }
+            DemodMode::Fm => {
+                // FMは MPX -> Stereo Decode -> resample(L/R) -> interleave
+                self.fm_stereo.process(
+                    &self.demod_buffer,
+                    &mut self.stereo_left_buffer,
+                    &mut self.stereo_right_buffer,
+                );
+
+                self.audio_left_resampled.clear();
+                self.audio_right_resampled.clear();
+                self.resampler
+                    .process(&self.stereo_left_buffer, &mut self.audio_left_resampled);
+                self.resampler_right
+                    .process(&self.stereo_right_buffer, &mut self.audio_right_resampled);
+
+                let frames = self
+                    .audio_left_resampled
+                    .len()
+                    .min(self.audio_right_resampled.len());
+                self.audio_buffer.clear();
+                self.audio_buffer.reserve(frames * 2);
+                for i in 0..frames {
+                    self.audio_buffer.push(self.audio_left_resampled[i]);
+                    self.audio_buffer.push(self.audio_right_resampled[i]);
+                }
+            }
+        }
 
         // デバッグログ（最初の5ブロックのみ）
         {

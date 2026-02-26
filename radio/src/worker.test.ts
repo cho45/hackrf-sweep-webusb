@@ -24,8 +24,17 @@ const createWasmMockModule = () => {
 		iq_input_capacity() { return 262144; }
 		audio_output_capacity() { return 4096; }
 		fft_output_capacity() { return 1024; }
+		audio_output_channels() { return 1; }
 		process_iq_len(_iqLen: number) {
 			return 0;
+		}
+		get_stats() {
+			return {
+				pilot_level: 0,
+				stereo_blend: 0,
+				stereo_locked: false,
+				mono_fallback_count: 0,
+			};
 		}
 		free() {}
 	}
