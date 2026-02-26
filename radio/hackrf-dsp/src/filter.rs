@@ -54,7 +54,20 @@ fn design_bandpass_coeffs(num_taps: usize, min_norm: f32, max_norm: f32) -> Vec<
 /// 複素ベースバンド用デシメーションフィルタ (簡単なCICやFIR)
 /// HackRF（例えば2MHz）から音声レート（たとえば48kHzなど）へとサンプリングレートを落とす。
 /// レート変換比（Decimation factor） M とします。
-pub struct DecimationFilter {
+pub enum DecimationFilter {
+    Boxcar(BoxcarDecimator),
+    Fir(FirDecimator),
+}
+
+pub struct BoxcarDecimator {
+    factor: usize,
+    inv: f32,
+    // 入力ストリームに対する間引き位相。チャンク境界を跨いで維持する。
+    phase: usize,
+    history: Vec<Complex<f32>>,
+}
+
+pub struct FirDecimator {
     factor: usize,
     // 入力ストリームに対する間引き位相。チャンク境界を跨いで維持する。
     phase: usize,
@@ -62,23 +75,31 @@ pub struct DecimationFilter {
     coeffs: Vec<f32>,
 }
 
+fn update_history(history: &mut [Complex<f32>], input: &[Complex<f32>]) {
+    let hist_len = history.len();
+    if hist_len == 0 {
+        return;
+    }
+
+    if input.len() >= hist_len {
+        history.copy_from_slice(&input[input.len() - hist_len..]);
+    } else {
+        // inputが短い場合はシフトして詰める
+        let shift = input.len();
+        history.copy_within(shift.., 0);
+        history[hist_len - shift..].copy_from_slice(input);
+    }
+}
+
 impl DecimationFilter {
     /// より高精度のカットオフが必要な場合は窓関数付きFIRなどを実装する
     pub fn new_boxcar(factor: usize) -> Self {
-        // 単純移動平均の係数は全て 1/M
-        let coeffs = vec![1.0 / (factor as f32); factor];
-        Self {
+        Self::Boxcar(BoxcarDecimator {
             factor,
+            inv: 1.0 / factor as f32,
             phase: 0,
             history: vec![Complex::new(0.0, 0.0); factor - 1],
-            coeffs,
-        }
-    }
-
-    /// より良い遮断特性を持つFIRフィルタを用いたデシメーター
-    #[cfg(test)]
-    pub fn new_fir(factor: usize, num_taps: usize, cutoff_norm: f32) -> Self {
-        Self::new_fir_band(factor, num_taps, 0.0, cutoff_norm)
+        })
     }
 
     /// FIRバンドパス（LPF(max) - LPF(min)）を用いたデシメーター
@@ -88,29 +109,119 @@ impl DecimationFilter {
         min_cutoff_norm: f32,
         max_cutoff_norm: f32,
     ) -> Self {
-        let coeffs = design_bandpass_coeffs(num_taps, min_cutoff_norm, max_cutoff_norm);
-
-        Self {
+        Self::Fir(FirDecimator {
             factor,
             phase: 0,
             history: vec![Complex::new(0.0, 0.0); num_taps - 1],
-            coeffs,
-        }
+            coeffs: design_bandpass_coeffs(num_taps, min_cutoff_norm, max_cutoff_norm),
+        })
+    }
+
+    /// より良い遮断特性を持つFIRフィルタを用いたデシメーター
+    #[cfg(test)]
+    pub fn new_fir(factor: usize, num_taps: usize, cutoff_norm: f32) -> Self {
+        Self::new_fir_band(factor, num_taps, 0.0, cutoff_norm)
     }
 
     /// FIR係数のDCゲイン（係数の総和）を返す
     pub fn coeffs_dc_gain(&self) -> f32 {
-        self.coeffs.iter().sum()
+        match self {
+            Self::Boxcar(_) => 1.0,
+            Self::Fir(fir) => fir.coeffs.iter().sum(),
+        }
     }
 
     /// 既存FIR係数を band-pass へ更新する（タップ数は維持）
     pub fn set_fir_bandpass(&mut self, min_cutoff_norm: f32, max_cutoff_norm: f32) {
-        self.coeffs = design_bandpass_coeffs(self.coeffs.len(), min_cutoff_norm, max_cutoff_norm);
+        match self {
+            Self::Fir(fir) => {
+                fir.coeffs =
+                    design_bandpass_coeffs(fir.coeffs.len(), min_cutoff_norm, max_cutoff_norm);
+            }
+            Self::Boxcar(boxcar) => {
+                let factor = boxcar.factor;
+                let phase = boxcar.phase;
+                let history = std::mem::take(&mut boxcar.history);
+                let coeffs = design_bandpass_coeffs(factor, min_cutoff_norm, max_cutoff_norm);
+                *self = Self::Fir(FirDecimator {
+                    factor,
+                    phase,
+                    history,
+                    coeffs,
+                });
+            }
+        }
     }
 
     /// ブロック単位でのフィルタリングとデシメーション
     /// 入力された配列から 1/M に長さを縮小した出力配列を `output` に書き込む
     pub fn process_into(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
+        match self {
+            Self::Boxcar(boxcar) => boxcar.process_into(input, output),
+            Self::Fir(fir) => fir.process_into(input, output),
+        }
+    }
+
+    /// ブロック単位でのフィルタリングとデシメーション
+    /// 入力された配列から 1/M に長さを縮小した出力配列を返す
+    #[cfg(test)]
+    pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<Complex<f32>> {
+        let factor = match self {
+            Self::Boxcar(boxcar) => boxcar.factor,
+            Self::Fir(fir) => fir.factor,
+        };
+        let mut output = Vec::with_capacity(input.len() / factor + 1);
+        self.process_into(input, &mut output);
+        output
+    }
+}
+
+impl BoxcarDecimator {
+    fn process_into(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
+        output.clear();
+        if input.is_empty() {
+            return;
+        }
+
+        output.reserve(input.len() / self.factor + 1);
+
+        let hist_len = self.history.len();
+        let mut current_idx = if self.phase == 0 {
+            0
+        } else {
+            self.factor - self.phase
+        };
+
+        while current_idx < input.len() {
+            let mut acc = Complex::new(0.0, 0.0);
+
+            if hist_len > 0 && current_idx < hist_len {
+                for &v in &self.history[current_idx..hist_len] {
+                    acc += v;
+                }
+                let from_input = current_idx + 1;
+                for &v in &input[..from_input] {
+                    acc += v;
+                }
+            } else {
+                let input_start = current_idx.saturating_sub(hist_len);
+                let input_end = input_start + self.factor;
+                for &v in &input[input_start..input_end] {
+                    acc += v;
+                }
+            }
+
+            output.push(acc * self.inv);
+            current_idx += self.factor;
+        }
+
+        self.phase = (self.phase + input.len()) % self.factor;
+        update_history(&mut self.history, input);
+    }
+}
+
+impl FirDecimator {
+    fn process_into(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
         output.clear();
         if input.is_empty() {
             return;
@@ -143,31 +254,7 @@ impl DecimationFilter {
         }
 
         self.phase = (self.phase + input.len()) % self.factor;
-
-        // history の更新 (次回の入力を考慮して末尾タップ-1個を保存)
-        let hist_len = self.history.len();
-        if hist_len == 0 {
-            return;
-        }
-
-        if input.len() >= hist_len {
-            self.history.copy_from_slice(&input[input.len() - hist_len..]);
-        } else {
-            // inputが短い場合はシフトして詰める
-            let shift = input.len();
-            self.history.copy_within(shift.., 0);
-            self.history[hist_len - shift..].copy_from_slice(input);
-        }
-
-    }
-
-    /// ブロック単位でのフィルタリングとデシメーション
-    /// 入力された配列から 1/M に長さを縮小した出力配列を返す
-    #[cfg(test)]
-    pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<Complex<f32>> {
-        let mut output = Vec::with_capacity(input.len() / self.factor + 1);
-        self.process_into(input, &mut output);
-        output
+        update_history(&mut self.history, input);
     }
 }
 
