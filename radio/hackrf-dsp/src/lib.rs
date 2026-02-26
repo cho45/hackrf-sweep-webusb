@@ -11,9 +11,9 @@ pub mod bench;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{
-    f32x4_convert_i32x4, f32x4_mul, f32x4_splat, i16x8_extend_high_i8x16,
-    i16x8_extend_low_i8x16, i32x4_extend_high_i16x8, i32x4_extend_low_i16x8, v128, v128_load,
-    v128_store,
+    f32x4, f32x4_add, f32x4_convert_i32x4, f32x4_mul, f32x4_splat, f32x4_sub,
+    i16x8_extend_high_i8x16, i16x8_extend_low_i8x16, i32x4_extend_high_i16x8,
+    i32x4_extend_low_i16x8, i32x4_shuffle, v128, v128_load, v128_store,
 };
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
@@ -166,7 +166,7 @@ fn float_to_i8(sample: f32) -> i8 {
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 #[inline]
-unsafe fn unpack_iq16_to_f32_simd(src_iq: *const i8, dst_f32: *mut f32) {
+unsafe fn unpack_iq16_to_f32x4x4_simd(src_iq: *const i8) -> (v128, v128, v128, v128) {
     let scale = f32x4_splat(1.0 / 128.0);
     let packed = v128_load(src_iq as *const v128);
     let lo_i16 = i16x8_extend_low_i8x16(packed);
@@ -176,11 +176,24 @@ unsafe fn unpack_iq16_to_f32_simd(src_iq: *const i8, dst_f32: *mut f32) {
     let f1 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(lo_i16)), scale);
     let f2 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(hi_i16)), scale);
     let f3 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(hi_i16)), scale);
+    (f0, f1, f2, f3)
+}
 
-    v128_store(dst_f32 as *mut v128, f0);
-    v128_store(dst_f32.add(4) as *mut v128, f1);
-    v128_store(dst_f32.add(8) as *mut v128, f2);
-    v128_store(dst_f32.add(12) as *mut v128, f3);
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn complex_mul_interleaved2_f32_simd(input: v128, osc: v128) -> v128 {
+    let osc_swapped = i32x4_shuffle::<1, 0, 3, 2>(osc, osc);
+
+    let prod_re = f32x4_mul(input, osc);
+    let prod_im = f32x4_mul(input, osc_swapped);
+
+    let prod_re_swapped = i32x4_shuffle::<1, 0, 3, 2>(prod_re, prod_re);
+    let prod_im_swapped = i32x4_shuffle::<1, 0, 3, 2>(prod_im, prod_im);
+
+    let re = f32x4_sub(prod_re, prod_re_swapped);
+    let im = f32x4_add(prod_im, prod_im_swapped);
+
+    i32x4_shuffle::<0, 4, 2, 6>(re, im)
 }
 
 #[wasm_bindgen]
@@ -475,41 +488,60 @@ impl Receiver {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     fn process_no_dc_with_fft(&mut self, iq_data: &[i8], fft_n: usize) {
         let num_samples = iq_data.len() / 2;
+        self.baseband_buffer
+            .resize(num_samples, Complex::new(0.0, 0.0));
+
+        let fft_copy_len = fft_n.saturating_mul(2).min(iq_data.len());
+        if fft_copy_len > 0 {
+            self.fft_input_buffer[..fft_copy_len].copy_from_slice(&iq_data[..fft_copy_len]);
+        }
+
         let mut idx = 0usize;
-        let mut unpacked = [0.0f32; 16];
-
         while idx + 8 <= num_samples {
+            let (x0, x1, x2, x3) =
+                unsafe { unpack_iq16_to_f32x4x4_simd(iq_data.as_ptr().add(idx * 2)) };
+
+            let n0 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n1 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n2 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n3 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+
+            let y0 = unsafe { complex_mul_interleaved2_f32_simd(x0, n0) };
+            let y1 = unsafe { complex_mul_interleaved2_f32_simd(x1, n1) };
+            let y2 = unsafe { complex_mul_interleaved2_f32_simd(x2, n2) };
+            let y3 = unsafe { complex_mul_interleaved2_f32_simd(x3, n3) };
+
             unsafe {
-                unpack_iq16_to_f32_simd(iq_data.as_ptr().add(idx * 2), unpacked.as_mut_ptr());
-            }
-
-            for lane in 0..8usize {
-                let n = lane * 2;
-                let sample = Complex::new(unpacked[n], unpacked[n + 1]);
-                let nco_val = self.nco.step();
-                self.baseband_buffer.push(sample * nco_val);
-
-                let out_idx = idx + lane;
-                if out_idx < fft_n {
-                    let fft_pos = out_idx * 2;
-                    self.fft_input_buffer[fft_pos] = float_to_i8(sample.re);
-                    self.fft_input_buffer[fft_pos + 1] = float_to_i8(sample.im);
-                }
+                let out_f32 = self.baseband_buffer.as_mut_ptr().add(idx) as *mut f32;
+                v128_store(out_f32 as *mut v128, y0);
+                v128_store(out_f32.add(4) as *mut v128, y1);
+                v128_store(out_f32.add(8) as *mut v128, y2);
+                v128_store(out_f32.add(12) as *mut v128, y3);
             }
             idx += 8;
         }
 
-        for (tail, iq) in iq_data[idx * 2..].chunks_exact(2).enumerate() {
-            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+        for out_idx in idx..num_samples {
+            let base = out_idx * 2;
+            let sample = Complex::new(iq_data[base] as f32 / 128.0, iq_data[base + 1] as f32 / 128.0);
             let nco_val = self.nco.step();
-            self.baseband_buffer.push(sample * nco_val);
-
-            let out_idx = idx + tail;
-            if out_idx < fft_n {
-                let fft_pos = out_idx * 2;
-                self.fft_input_buffer[fft_pos] = float_to_i8(sample.re);
-                self.fft_input_buffer[fft_pos + 1] = float_to_i8(sample.im);
-            }
+            self.baseband_buffer[out_idx] = sample * nco_val;
         }
     }
 
@@ -531,27 +563,56 @@ impl Receiver {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     fn process_no_dc_without_fft(&mut self, iq_data: &[i8]) {
         let num_samples = iq_data.len() / 2;
+        self.baseband_buffer
+            .resize(num_samples, Complex::new(0.0, 0.0));
+
         let mut idx = 0usize;
-        let mut unpacked = [0.0f32; 16];
 
         while idx + 8 <= num_samples {
-            unsafe {
-                unpack_iq16_to_f32_simd(iq_data.as_ptr().add(idx * 2), unpacked.as_mut_ptr());
-            }
+            let (x0, x1, x2, x3) =
+                unsafe { unpack_iq16_to_f32x4x4_simd(iq_data.as_ptr().add(idx * 2)) };
 
-            for lane in 0..8usize {
-                let n = lane * 2;
-                let sample = Complex::new(unpacked[n], unpacked[n + 1]);
-                let nco_val = self.nco.step();
-                self.baseband_buffer.push(sample * nco_val);
+            let n0 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n1 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n2 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+            let n3 = {
+                let a = self.nco.step();
+                let b = self.nco.step();
+                f32x4(a.re, a.im, b.re, b.im)
+            };
+
+            let y0 = unsafe { complex_mul_interleaved2_f32_simd(x0, n0) };
+            let y1 = unsafe { complex_mul_interleaved2_f32_simd(x1, n1) };
+            let y2 = unsafe { complex_mul_interleaved2_f32_simd(x2, n2) };
+            let y3 = unsafe { complex_mul_interleaved2_f32_simd(x3, n3) };
+
+            unsafe {
+                let out_f32 = self.baseband_buffer.as_mut_ptr().add(idx) as *mut f32;
+                v128_store(out_f32 as *mut v128, y0);
+                v128_store(out_f32.add(4) as *mut v128, y1);
+                v128_store(out_f32.add(8) as *mut v128, y2);
+                v128_store(out_f32.add(12) as *mut v128, y3);
             }
             idx += 8;
         }
 
-        for iq in iq_data[idx * 2..].chunks_exact(2) {
-            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+        for out_idx in idx..num_samples {
+            let base = out_idx * 2;
+            let sample = Complex::new(iq_data[base] as f32 / 128.0, iq_data[base + 1] as f32 / 128.0);
             let nco_val = self.nco.step();
-            self.baseband_buffer.push(sample * nco_val);
+            self.baseband_buffer[out_idx] = sample * nco_val;
         }
     }
 
