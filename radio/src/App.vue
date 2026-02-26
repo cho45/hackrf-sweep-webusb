@@ -138,6 +138,7 @@ import * as Comlink from 'comlink';
 import { WaterfallGL, Waterfall } from './utils';
 import { HackRF } from './hackrf';
 import Keypad from './components/Keypad.vue';
+import audioWorkletModuleUrl from './audio-stream-processor.ts?worker&url';
 
 // comlink 経由でバックエンド(WASM/HackRF処理)をロード
 const WorkerBackend = Comlink.wrap<any>(new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' }));
@@ -507,7 +508,7 @@ const initAudio = async () => {
   }
 
   if (!audioModuleLoaded) {
-    await audioCtx.audioWorklet.addModule('/audio-stream-processor.js');
+    await audioCtx.audioWorklet.addModule(audioWorkletModuleUrl);
     audioModuleLoaded = true;
   }
 
