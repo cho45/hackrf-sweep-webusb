@@ -166,12 +166,11 @@ cargo run --release --bin bench_pipeline
 必要なケースだけ実行する場合:
 
 ```sh
-BENCH_MODE=FM BENCH_SR=20 BENCH_DC=off cargo run --release --bin bench_pipeline
+BENCH_MODE=FM BENCH_SR=20 cargo run --release --bin bench_pipeline
 ```
 
 - `BENCH_MODE`: `AM` / `FM`
 - `BENCH_SR`: `20`（Msps）または `20000000`（Hz）
-- `BENCH_DC`: `on` / `off`
 
 ## ライセンス
 

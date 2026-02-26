@@ -1,8 +1,6 @@
 #![deny(warnings)]
 #![deny(clippy::all)]
 
-#[cfg(not(target_arch = "wasm32"))]
-mod dc;
 mod demod;
 mod fft;
 mod filter;
@@ -23,10 +21,6 @@ use crate::demod::{AMDemodulator, FMDemodulator, Nco};
 use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
-
-// 固定QのDCノッチ。2MHz時に等価ノッチ幅は約2kHz。
-#[cfg(not(target_arch = "wasm32"))]
-const FIXED_DC_NOTCH_Q: f32 = 1_000.0;
 
 /// FM の最大周波数偏移 [Hz]。WFM（ワイドFM放送）想定。
 const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
