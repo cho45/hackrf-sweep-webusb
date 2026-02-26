@@ -104,8 +104,9 @@
         <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
         <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
         <div>fft target/noise/snr: {{ fmtNum(dspPerf.fftTargetDb, 1) }} / {{ fmtNum(dspPerf.fftNoiseFloorDb, 1) }} / {{ fmtNum(dspPerf.fftSnrDb, 1) }} dB</div>
-        <div>stereo: {{ dspPerf.stereoLocked ? 'LOCK' : 'MONO' }} / blend {{ fmtNum(dspPerf.stereoBlend, 2) }}</div>
-        <div>pilot: {{ fmtNum(dspPerf.pilotLevel, 3) }} / mono fallback: {{ fmtNum(dspPerf.monoFallbackCount, 0) }}</div>
+        <div>stereo: {{ dspPerf.fmStereoLocked ? 'LOCK' : 'MONO' }} / blend {{ fmtNum(dspPerf.fmStereoBlend, 2) }}</div>
+        <div>pilot: {{ fmtNum(dspPerf.fmStereoPilotLevel, 3) }} / mono fallback: {{ fmtNum(dspPerf.fmStereoMonoFallbackCount, 0) }}</div>
+        <div>pll: {{ dspPerf.fmStereoPllLocked ? 'LOCK' : 'UNLOCK' }}</div>
 
         <div style="margin-top: 8px;"><b>Draw</b></div>
         <div>fps: {{ fmtNum(drawPerf.fps, 1) }}</div>
@@ -315,10 +316,11 @@ type DspPerfStats = {
   // 長期供給不足の判定
   audioOutHzLong: number;
   // FMステレオ復調状態（AM時はゼロ値）
-  pilotLevel: number;
-  stereoBlend: number;
-  stereoLocked: boolean;
-  monoFallbackCount: number;
+  fmStereoPilotLevel: number;
+  fmStereoBlend: number;
+  fmStereoLocked: boolean;
+  fmStereoMonoFallbackCount: number;
+  fmStereoPllLocked: boolean;
   adcPeak: number;
   fftTargetDb: number;
   fftNoiseFloorDb: number;
@@ -407,10 +409,11 @@ const dspPerf = reactive({
   // 長期供給不足監視
   audioOutHzLong: 0,
   // FMステレオ復調状態
-  pilotLevel: 0,
-  stereoBlend: 0,
-  stereoLocked: false,
-  monoFallbackCount: 0,
+  fmStereoPilotLevel: 0,
+  fmStereoBlend: 0,
+  fmStereoLocked: false,
+  fmStereoMonoFallbackCount: 0,
+  fmStereoPllLocked: false,
   adcPeak: 0,
   fftTargetDb: 0,
   fftNoiseFloorDb: 0,
@@ -565,7 +568,7 @@ const onTuneChange = async () => {
 const openKeypad = (field: KeypadField, prefillHz?: number) => {
   keypadPrefillHz.value = typeof prefillHz === 'number' && Number.isFinite(prefillHz)
     ? Math.round(prefillHz)
-    : null;
+    : 0;
   keypadField.value = field;
   keypadOpenToken.value += 1;
 };
@@ -920,10 +923,11 @@ const start = async () => {
         dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
         dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
         dspPerf.audioOutHzLong = perf.audioOutHzLong;
-        dspPerf.pilotLevel = perf.pilotLevel;
-        dspPerf.stereoBlend = perf.stereoBlend;
-        dspPerf.stereoLocked = perf.stereoLocked;
-        dspPerf.monoFallbackCount = perf.monoFallbackCount;
+        dspPerf.fmStereoPilotLevel = perf.fmStereoPilotLevel;
+        dspPerf.fmStereoBlend = perf.fmStereoBlend;
+        dspPerf.fmStereoLocked = perf.fmStereoLocked;
+        dspPerf.fmStereoMonoFallbackCount = perf.fmStereoMonoFallbackCount;
+        dspPerf.fmStereoPllLocked = perf.fmStereoPllLocked;
         dspPerf.adcPeak = perf.adcPeak;
         dspPerf.fftTargetDb = perf.fftTargetDb;
         dspPerf.fftNoiseFloorDb = perf.fftNoiseFloorDb;

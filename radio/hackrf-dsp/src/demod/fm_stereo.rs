@@ -6,6 +6,10 @@ pub struct FMStereoStats {
     pub stereo_blend: f32,
     pub stereo_locked: bool,
     pub mono_fallback_count: u32,
+    pub pll_phase_err_rad: f32,
+    pub pll_freq_corr_hz: f32,
+    pub pll_q_over_i: f32,
+    pub pll_locked: bool,
 }
 
 const AUDIO_FIR_TAPS: usize = 128;
@@ -14,6 +18,8 @@ const PILOT_DETECT_LPF_HZ: f32 = 40.0;
 const PLL_BW_HZ: f32 = 12.0;
 const PLL_DAMPING: f32 = 0.707;
 const PLL_MAX_FREQ_ERR_HZ: f32 = 400.0;
+const PLL_LOCK_ERR_RAD: f32 = 0.35;
+const PLL_LOCK_Q_OVER_I_MAX: f32 = 0.35;
 
 /// FM MPX から L/R を復元する簡易ステレオデコーダ。
 ///
@@ -31,6 +37,7 @@ const PLL_MAX_FREQ_ERR_HZ: f32 = 400.0;
 /// - L-R は 38kHz 同期検波 + LPF
 /// - pilot レベルに応じて stereo blend を自動調整し、ロック不十分時は mono に寄せる
 pub struct FMStereoDecoder {
+    sample_rate_hz: f32,
     pilot_phase: f32,
     pilot_omega: f32,
     pilot_lo_phase: f32,
@@ -138,6 +145,7 @@ impl FMStereoDecoder {
         });
 
         Self {
+            sample_rate_hz,
             pilot_phase: 0.0,
             pilot_omega,
             pilot_lo_phase: 0.0,
@@ -365,11 +373,24 @@ impl FMStereoDecoder {
     }
 
     pub fn stats(&self) -> FMStereoStats {
+        let i_abs = self.pilot_i_lp.abs();
+        let q_abs = self.pilot_q_lp.abs();
+        let q_over_i = q_abs / (i_abs + 1e-9);
+        let phase_err_abs = self.pilot_phase_err_last.abs();
+        let pll_locked = self.pilot_level >= self.pilot_lock_low
+            && phase_err_abs < PLL_LOCK_ERR_RAD
+            && q_over_i < PLL_LOCK_Q_OVER_I_MAX;
+        let pll_freq_corr_hz =
+            self.pll_freq_corr * self.sample_rate_hz / (2.0 * std::f32::consts::PI);
         FMStereoStats {
             pilot_level: self.pilot_level,
             stereo_blend: self.stereo_blend,
             stereo_locked: self.stereo_locked,
             mono_fallback_count: self.mono_fallback_count,
+            pll_phase_err_rad: self.pilot_phase_err_last,
+            pll_freq_corr_hz,
+            pll_q_over_i: q_over_i,
+            pll_locked,
         }
     }
 }

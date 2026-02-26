@@ -13,10 +13,11 @@ type PerfStats = {
 	// 長期の供給不足判定（短窓の揺れは見ない）
 	audioOutHzLong: number;
 	// FMステレオ復調状態（AM時はゼロ値）
-	pilotLevel: number;
-	stereoBlend: number;
-	stereoLocked: boolean;
-	monoFallbackCount: number;
+	fmStereoPilotLevel: number;
+	fmStereoBlend: number;
+	fmStereoLocked: boolean;
+	fmStereoMonoFallbackCount: number;
+	fmStereoPllLocked: boolean;
 	adcPeak: number;
 	fftTargetDb: number;
 	fftNoiseFloorDb: number;
@@ -656,10 +657,41 @@ export class RadioBackend {
 					blockIntervalMsPeak,
 					dspProcessMsPeak,
 					audioOutHzLong: audioFramesOutTotal / totalSec,
-					pilotLevel: readStatNum(demodStats, "pilotLevel", "pilot_level"),
-					stereoBlend: readStatNum(demodStats, "stereoBlend", "stereo_blend"),
-					stereoLocked: readStatBool(demodStats, "stereoLocked", "stereo_locked"),
-					monoFallbackCount: readStatNum(demodStats, "monoFallbackCount", "mono_fallback_count"),
+					fmStereoPilotLevel: readStatNum(
+						demodStats,
+						"fmStereoPilotLevel",
+						"fm_stereo_pilot_level",
+						"pilotLevel",
+						"pilot_level"
+					),
+					fmStereoBlend: readStatNum(
+						demodStats,
+						"fmStereoBlend",
+						"fm_stereo_blend",
+						"stereoBlend",
+						"stereo_blend"
+					),
+					fmStereoLocked: readStatBool(
+						demodStats,
+						"fmStereoLocked",
+						"fm_stereo_locked",
+						"stereoLocked",
+						"stereo_locked"
+					),
+					fmStereoMonoFallbackCount: readStatNum(
+						demodStats,
+						"fmStereoMonoFallbackCount",
+						"fm_stereo_mono_fallback_count",
+						"monoFallbackCount",
+						"mono_fallback_count"
+					),
+					fmStereoPllLocked: readStatBool(
+						demodStats,
+						"fmStereoPllLocked",
+						"fm_stereo_pll_locked",
+						"pllLocked",
+						"pll_locked"
+					),
 					adcPeak: readStatNum(demodStats, "adcPeak", "adc_peak"),
 					fftTargetDb: fftQuality.targetDb,
 					fftNoiseFloorDb: fftQuality.noiseFloorDb,

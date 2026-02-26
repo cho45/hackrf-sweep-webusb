@@ -142,33 +142,57 @@ pub struct Receiver {
 
 #[wasm_bindgen]
 pub struct ReceiverStats {
-    pilot_level: f32,
-    stereo_blend: f32,
-    stereo_locked: bool,
-    mono_fallback_count: u32,
+    fm_stereo_pilot_level: f32,
+    fm_stereo_blend: f32,
+    fm_stereo_locked: bool,
+    fm_stereo_mono_fallback_count: u32,
+    fm_stereo_pll_phase_err_rad: f32,
+    fm_stereo_pll_freq_corr_hz: f32,
+    fm_stereo_pll_q_over_i: f32,
+    fm_stereo_pll_locked: bool,
     adc_peak: f32,
 }
 
 #[wasm_bindgen]
 impl ReceiverStats {
     #[wasm_bindgen(getter)]
-    pub fn pilot_level(&self) -> f32 {
-        self.pilot_level
+    pub fn fm_stereo_pilot_level(&self) -> f32 {
+        self.fm_stereo_pilot_level
     }
 
     #[wasm_bindgen(getter)]
-    pub fn stereo_blend(&self) -> f32 {
-        self.stereo_blend
+    pub fn fm_stereo_blend(&self) -> f32 {
+        self.fm_stereo_blend
     }
 
     #[wasm_bindgen(getter)]
-    pub fn stereo_locked(&self) -> bool {
-        self.stereo_locked
+    pub fn fm_stereo_locked(&self) -> bool {
+        self.fm_stereo_locked
     }
 
     #[wasm_bindgen(getter)]
-    pub fn mono_fallback_count(&self) -> u32 {
-        self.mono_fallback_count
+    pub fn fm_stereo_mono_fallback_count(&self) -> u32 {
+        self.fm_stereo_mono_fallback_count
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn fm_stereo_pll_phase_err_rad(&self) -> f32 {
+        self.fm_stereo_pll_phase_err_rad
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn fm_stereo_pll_freq_corr_hz(&self) -> f32 {
+        self.fm_stereo_pll_freq_corr_hz
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn fm_stereo_pll_q_over_i(&self) -> f32 {
+        self.fm_stereo_pll_q_over_i
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn fm_stereo_pll_locked(&self) -> bool {
+        self.fm_stereo_pll_locked
     }
 
     #[wasm_bindgen(getter)]
@@ -551,10 +575,14 @@ impl Receiver {
             FMStereoStats::default()
         };
         ReceiverStats {
-            pilot_level: stereo.pilot_level,
-            stereo_blend: stereo.stereo_blend,
-            stereo_locked: stereo.stereo_locked,
-            mono_fallback_count: stereo.mono_fallback_count,
+            fm_stereo_pilot_level: stereo.pilot_level,
+            fm_stereo_blend: stereo.stereo_blend,
+            fm_stereo_locked: stereo.stereo_locked,
+            fm_stereo_mono_fallback_count: stereo.mono_fallback_count,
+            fm_stereo_pll_phase_err_rad: stereo.pll_phase_err_rad,
+            fm_stereo_pll_freq_corr_hz: stereo.pll_freq_corr_hz,
+            fm_stereo_pll_q_over_i: stereo.pll_q_over_i,
+            fm_stereo_pll_locked: stereo.pll_locked,
             adc_peak: self.adc_peak,
         }
     }
@@ -1012,8 +1040,12 @@ mod tests {
         let iq = fm_modulate_to_i8_iq(&mpx, fs, FM_MAX_DEVIATION_HZ);
 
         let (audio, stats) = run_fm_receiver_audio(&iq, 98_000.0);
-        assert!(stats.stereo_blend() > 0.50, "stereo blend too low: {}", stats.stereo_blend());
-        assert!(stats.stereo_locked(), "stereo did not lock in e2e pipeline");
+        assert!(
+            stats.fm_stereo_blend() > 0.50,
+            "stereo blend too low: {}",
+            stats.fm_stereo_blend()
+        );
+        assert!(stats.fm_stereo_locked(), "stereo did not lock in e2e pipeline");
 
         let (left, right) = split_stereo_interleaved(&audio);
         assert!(left.len() > 8_000, "too few audio samples: {}", left.len());
