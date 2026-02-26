@@ -94,6 +94,7 @@ fn update_history(history: &mut [Complex<f32>], input: &[Complex<f32>]) {
 impl DecimationFilter {
     /// より高精度のカットオフが必要な場合は窓関数付きFIRなどを実装する
     pub fn new_boxcar(factor: usize) -> Self {
+        assert!(factor > 0, "factor must be > 0");
         Self::Boxcar(BoxcarDecimator {
             factor,
             inv: 1.0 / factor as f32,
@@ -109,6 +110,7 @@ impl DecimationFilter {
         min_cutoff_norm: f32,
         max_cutoff_norm: f32,
     ) -> Self {
+        assert!(factor > 0, "factor must be > 0");
         Self::Fir(FirDecimator {
             factor,
             phase: 0,
@@ -292,6 +294,69 @@ mod tests {
 
         let out = flt.process(&input);
         assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn test_boxcar_decimation_chunk_invariance() {
+        let factor = 10;
+        let len = 131_072 * 2 + 37;
+        let mut input = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f32 / 2_000_000.0;
+            let re = 0.7 * (2.0 * std::f32::consts::PI * 1_500.0 * t).cos()
+                + 0.2 * (2.0 * std::f32::consts::PI * 25_000.0 * t).sin();
+            let im = 0.7 * (2.0 * std::f32::consts::PI * 1_500.0 * t).sin()
+                - 0.2 * (2.0 * std::f32::consts::PI * 25_000.0 * t).cos();
+            input.push(Complex::new(re, im));
+        }
+
+        let mut whole = DecimationFilter::new_boxcar(factor);
+        let out_whole = whole.process(&input);
+
+        for chunk_size in [1usize, 3, 7, 64, 511, 131_072] {
+            let mut chunked = DecimationFilter::new_boxcar(factor);
+            let out_chunks = run_in_chunks(&mut chunked, &input, chunk_size);
+            assert_eq!(out_whole.len(), out_chunks.len(), "chunk_size={}", chunk_size);
+            let max_err = out_whole
+                .iter()
+                .zip(out_chunks.iter())
+                .map(|(a, b)| (*a - *b).norm())
+                .fold(0.0, f32::max);
+            assert!(
+                max_err < 1e-6,
+                "chunk_size={} diverged from whole processing: max_err={}",
+                chunk_size,
+                max_err
+            );
+        }
+    }
+
+    #[test]
+    fn test_boxcar_factor_one_is_passthrough() {
+        let input = vec![
+            Complex::new(0.1, -0.2),
+            Complex::new(-0.3, 0.4),
+            Complex::new(0.5, 0.6),
+            Complex::new(-0.7, -0.8),
+        ];
+        let mut flt = DecimationFilter::new_boxcar(1);
+        let out = flt.process(&input);
+        assert_eq!(out.len(), input.len());
+        for (a, b) in out.iter().zip(input.iter()) {
+            assert!((*a - *b).norm() < 1e-8);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "factor must be > 0")]
+    fn test_boxcar_zero_factor_panics() {
+        let _ = DecimationFilter::new_boxcar(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "factor must be > 0")]
+    fn test_fir_zero_factor_panics() {
+        let _ = DecimationFilter::new_fir_band(0, 63, 0.0, 0.1);
     }
 
     #[test]

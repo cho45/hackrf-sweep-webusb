@@ -31,11 +31,15 @@ const FM_DEMOD_RATE: f32 = 200_000.0;
 const COARSE_STAGE_RATE: f32 = 1_000_000.0;
 const FFT_DC_INTERP_HALF_WIDTH: usize = 2;
 
+#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = console)]
     fn log(s: &str);
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+fn log(_s: &str) {}
 
 /// 復調モード
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -642,5 +646,112 @@ mod tests {
     fn sanitize_if_band_is_bounded_by_demod_rate() {
         let (_, max) = sanitize_if_band(0.0, 200_000.0, AM_DEMOD_RATE);
         assert!(max <= AM_DEMOD_RATE * 0.49);
+    }
+
+    #[test]
+    fn sanitize_if_band_repairs_invalid_input() {
+        let demod_rate = 50_000.0;
+        let (min_hz, max_hz) = sanitize_if_band(-10_000.0, -1.0, demod_rate);
+        assert!(min_hz >= 0.0);
+        assert!(max_hz > min_hz);
+        assert!(max_hz <= demod_rate * 0.49);
+
+        let (min_hz2, max_hz2) = sanitize_if_band(1_000_000.0, 1_000_100.0, demod_rate);
+        assert_eq!(min_hz2, 0.0);
+        assert!(max_hz2 <= demod_rate * 0.49);
+        assert!(max_hz2 > 0.0);
+    }
+
+    #[test]
+    fn sanitize_fft_view_clamps_start_and_len() {
+        let (start, len) = sanitize_fft_view(1024, 999_999, 0);
+        assert_eq!(start, 1023);
+        assert_eq!(len, 1);
+
+        let (start2, len2) = sanitize_fft_view(1024, 1000, 4096);
+        assert_eq!(start2, 1000);
+        assert_eq!(len2, 24);
+    }
+
+    #[test]
+    fn interpolate_fft_dc_bins_is_noop_for_short_input() {
+        let mut bins = vec![-120.0f32; 6];
+        let before = bins.clone();
+        interpolate_fft_dc_bins(&mut bins, FFT_DC_INTERP_HALF_WIDTH);
+        assert_eq!(bins, before);
+    }
+
+    #[test]
+    fn interpolate_fft_dc_bins_fills_linear_bridge() {
+        let mut bins = vec![
+            -90.0, -80.0, -70.0, -60.0, -50.0, // left side
+            10.0, 20.0, 30.0, 40.0, 50.0, // dc neighborhood to overwrite
+            -40.0, -30.0, -20.0, -10.0, 0.0, // right side
+        ];
+        interpolate_fft_dc_bins(&mut bins, 2);
+        // n=15 -> dc=7, overwritten range 5..=9, endpoints idx4=-50 idx10=-40
+        let expected = [-48.333332, -46.666668, -45.0, -43.333332, -41.666668];
+        for (idx, exp) in (5usize..=9).zip(expected.iter()) {
+            assert!((bins[idx] - exp).abs() < 1e-4, "idx={} got={} expected={}", idx, bins[idx], exp);
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn make_receiver() -> Receiver {
+        Receiver::new(
+            2_000_000.0,
+            100_000_000.0,
+            100_000_000.0,
+            "AM",
+            48_000.0,
+            1024,
+            0,
+            1024,
+            0.0,
+            4_500.0,
+            true,
+        )
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn alloc_io_buffers_validates_arguments() {
+        let mut receiver = make_receiver();
+        assert!(receiver.alloc_io_buffers(0, 1024, 1024).is_err());
+        assert!(receiver.alloc_io_buffers(3, 1024, 1024).is_err());
+        assert!(receiver.alloc_io_buffers(1024, 0, 1024).is_err());
+        assert!(receiver.alloc_io_buffers(1024, 1024, 100).is_err());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn process_iq_len_requires_alloc_and_valid_len() {
+        let mut receiver = make_receiver();
+        assert!(receiver.process_iq_len(1024).is_err());
+
+        receiver
+            .alloc_io_buffers(4096, 4096, 1024)
+            .expect("alloc_io_buffers should succeed");
+        assert!(receiver.process_iq_len(0).is_err());
+        assert!(receiver.process_iq_len(3).is_err());
+        assert!(receiver.process_iq_len(4098).is_err());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[test]
+    fn process_iq_len_smoke() {
+        let mut receiver = make_receiver();
+        receiver
+            .alloc_io_buffers(4096, 4096, 1024)
+            .expect("alloc_io_buffers should succeed");
+
+        let iq_ptr = receiver.iq_input_ptr() as usize as *mut i8;
+        let iq_slice = unsafe { std::slice::from_raw_parts_mut(iq_ptr, 4096) };
+        for (i, v) in iq_slice.iter_mut().enumerate() {
+            *v = if (i & 1) == 0 { 64 } else { -64 };
+        }
+        let out = receiver.process_iq_len(4096);
+        assert!(out.is_ok());
+        assert!(out.expect("audio length should be returned") <= receiver.audio_output_capacity());
     }
 }
