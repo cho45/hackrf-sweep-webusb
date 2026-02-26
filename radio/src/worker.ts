@@ -31,8 +31,7 @@ type ReceiverCtor = new (
 	fftVisibleBins: number,
 	ifMinHz: number,
 	ifMaxHz: number,
-	dcCancelEnabled: boolean,
-	fftUseProcessed: boolean
+	dcCancelEnabled: boolean
 ) => {
 	alloc_io_buffers: (maxIqBytes: number, maxAudioSamples: number, maxFftBins: number) => Promise<void> | void;
 	free_io_buffers: () => void;
@@ -47,7 +46,6 @@ type ReceiverCtor = new (
 	set_target_freq: (centerFreq: number, targetFreq: number) => void;
 	set_if_band: (minHz: number, maxHz: number) => void;
 	set_dc_cancel_enabled: (enabled: boolean) => void;
-	set_fft_use_processed: (enabled: boolean) => void;
 };
 
 type WasmBindings = {
@@ -201,7 +199,6 @@ export class RadioBackend {
 			ifMinHz: number;
 			ifMaxHz: number;
 			dcCancelEnabled: boolean;
-			fftUseProcessed: boolean;
 			ampEnabled: boolean;
 			antennaEnabled: boolean;
 			lnaGain: number;
@@ -229,8 +226,7 @@ export class RadioBackend {
 			options.fftVisibleBins,
 			options.ifMinHz,
 			options.ifMaxHz,
-			options.dcCancelEnabled,
-			options.fftUseProcessed
+			options.dcCancelEnabled
 		);
 
 		// デバイス側にサンプリングレートおよび周波数を設定
@@ -420,12 +416,6 @@ export class RadioBackend {
 	async setDcCancelEnabled(enabled: boolean) {
 		if (this.receiver) {
 			this.receiver.set_dc_cancel_enabled(enabled);
-		}
-	}
-
-	async setFftUseProcessed(enabled: boolean) {
-		if (this.receiver) {
-			this.receiver.set_fft_use_processed(enabled);
 		}
 	}
 }

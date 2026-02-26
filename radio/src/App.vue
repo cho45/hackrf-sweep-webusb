@@ -76,10 +76,7 @@
           <input type="checkbox" v-model="options.antennaEnabled"> Antenna Port Power
         </label>
         <label class="checkbox">
-          <input type="checkbox" v-model="dcCancelEnabled"> IQ DC Cancel
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" v-model="fftUseProcessed"> FFT Source: Processed IQ
+          <input type="checkbox" v-model="dcCancelEnabled"> FFT DC Interpolate
         </label>
       </div>
 
@@ -166,7 +163,6 @@ type PersistedSettings = {
   spanHz: number;
   targetFreq: number;
   dcCancelEnabled: boolean;
-  fftUseProcessed: boolean;
   ampEnabled: boolean;
   antennaEnabled: boolean;
   lnaGain: number;
@@ -178,7 +174,6 @@ const defaultSettings: PersistedSettings = {
   spanHz: 1_500_000,
   targetFreq: 1_025_000,
   dcCancelEnabled: true,
-  fftUseProcessed: true,
   ampEnabled: false,
   antennaEnabled: false,
   lnaGain: 16,
@@ -211,7 +206,6 @@ const loadSettings = (): PersistedSettings => {
         : (typeof parsed.viewBandwidthHz === 'number' ? parsed.viewBandwidthHz : defaultSettings.spanHz),
       targetFreq: getNumber('targetFreq'),
       dcCancelEnabled: getBoolean('dcCancelEnabled'),
-      fftUseProcessed: getBoolean('fftUseProcessed'),
       ampEnabled: getBoolean('ampEnabled'),
       antennaEnabled: getBoolean('antennaEnabled'),
       lnaGain: getNumber('lnaGain'),
@@ -229,7 +223,6 @@ const spanHz = ref(loadedSettings.spanHz);
 const targetFreq = ref(loadedSettings.targetFreq);
 const rxSampleRate = ref(2_000_000);
 const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
-const fftUseProcessed = ref(loadedSettings.fftUseProcessed);
 const demodMode = ref(loadedSettings.demodMode);
 
 const defaultIfBandForMode = (mode: string): { minHz: number; maxHz: number } => {
@@ -411,7 +404,6 @@ const saveSettings = () => {
       spanHz: spanHz.value,
       targetFreq: targetFreq.value,
       dcCancelEnabled: dcCancelEnabled.value,
-      fftUseProcessed: fftUseProcessed.value,
       ampEnabled: options.ampEnabled,
       antennaEnabled: options.antennaEnabled,
       lnaGain: options.lnaGain,
@@ -719,7 +711,6 @@ const start = async () => {
     ifMinHz: ifMinHz.value,
     ifMaxHz: ifMaxHz.value,
     dcCancelEnabled: dcCancelEnabled.value,
-    fftUseProcessed: fftUseProcessed.value,
     ampEnabled: options.ampEnabled,
     antennaEnabled: options.antennaEnabled,
     lnaGain: options.lnaGain,
@@ -746,15 +737,11 @@ watch(() => options.antennaEnabled, (val) => { if (connected.value) backend.setA
 watch(() => dcCancelEnabled.value, (val) => {
   if (connected.value && running.value) backend.setDcCancelEnabled(val);
 });
-watch(() => fftUseProcessed.value, (val) => {
-  if (connected.value && running.value) backend.setFftUseProcessed(val);
-});
 watch(
   [
     spanHz,
     targetFreq,
     dcCancelEnabled,
-    fftUseProcessed,
     demodMode,
     () => options.ampEnabled,
     () => options.antennaEnabled,

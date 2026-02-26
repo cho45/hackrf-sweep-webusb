@@ -1,6 +1,7 @@
 #![deny(warnings)]
 #![deny(clippy::all)]
 
+#[cfg(not(target_arch = "wasm32"))]
 mod dc;
 mod demod;
 mod fft;
@@ -18,13 +19,13 @@ use std::arch::wasm32::{
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
 
-use crate::dc::DcCanceller;
 use crate::demod::{AMDemodulator, FMDemodulator, Nco};
 use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
 
 // 固定QのDCノッチ。2MHz時に等価ノッチ幅は約2kHz。
+#[cfg(not(target_arch = "wasm32"))]
 const FIXED_DC_NOTCH_Q: f32 = 1_000.0;
 
 /// FM の最大周波数偏移 [Hz]。WFM（ワイドFM放送）想定。
@@ -34,6 +35,7 @@ const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
 const AM_DEMOD_RATE: f32 = 50_000.0;
 const FM_DEMOD_RATE: f32 = 200_000.0;
 const COARSE_STAGE_RATE: f32 = 1_000_000.0;
+const FFT_DC_INTERP_HALF_WIDTH: usize = 2;
 
 #[wasm_bindgen]
 extern "C" {
@@ -105,12 +107,10 @@ pub struct Receiver {
     if_min_hz: f32,
     if_max_hz: f32,
     dc_cancel_enabled: bool,
-    fft_use_processed: bool,
     fft_visible_start: usize,
     fft_visible_len: usize,
     mode: DemodMode,
     nco: Nco,
-    dc_canceller: DcCanceller,
     coarse_filter: DecimationFilter,
     demod_filter: DecimationFilter,
     am_demod: AMDemodulator,
@@ -126,7 +126,6 @@ pub struct Receiver {
     audio_buffer: Vec<f32>,
     fft_buffer: Vec<f32>,
     fft_visible_buffer: Vec<f32>,
-    fft_input_buffer: Vec<i8>,
     io_iq_buffer: Vec<i8>,
     io_audio_buffer: Vec<f32>,
     io_fft_buffer: Vec<f32>,
@@ -159,9 +158,26 @@ fn sanitize_fft_view(fft_size: usize, start_bin: usize, visible_bins: usize) -> 
     (safe_start, safe_len)
 }
 
-fn float_to_i8(sample: f32) -> i8 {
-    let scaled = (sample.clamp(-1.0, 0.992_187_5) * 128.0).round();
-    scaled as i8
+fn interpolate_fft_dc_bins(fft_db: &mut [f32], half_width: usize) {
+    let n = fft_db.len();
+    if n < 2 * half_width + 3 {
+        return;
+    }
+    let dc = n / 2;
+    if dc <= half_width || dc + half_width + 1 >= n {
+        return;
+    }
+
+    let left_idx = dc - half_width - 1;
+    let right_idx = dc + half_width + 1;
+    let left = fft_db[left_idx];
+    let right = fft_db[right_idx];
+    let slope = (right - left) / (right_idx - left_idx) as f32;
+
+    for idx in (dc - half_width)..=(dc + half_width) {
+        let t = (idx - left_idx) as f32;
+        fft_db[idx] = left + slope * t;
+    }
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -211,7 +227,6 @@ impl Receiver {
         if_min_hz: f32,
         if_max_hz: f32,
         dc_cancel_enabled: bool,
-        fft_use_processed: bool,
     ) -> Self {
         console_error_panic_hook::set_once();
 
@@ -268,12 +283,10 @@ impl Receiver {
             if_min_hz,
             if_max_hz,
             dc_cancel_enabled,
-            fft_use_processed,
             fft_visible_start,
             fft_visible_len,
             mode,
             nco: Nco::new(-offset_hz, sample_rate),
-            dc_canceller: DcCanceller::new(sample_rate, FIXED_DC_NOTCH_Q),
             coarse_filter: {
                 let f = DecimationFilter::new_boxcar(plan.coarse_factor);
                 log(&format!(
@@ -312,7 +325,6 @@ impl Receiver {
             audio_buffer: Vec::with_capacity(8_192),
             fft_buffer: vec![0.0; fft_size],
             fft_visible_buffer: vec![-120.0; fft_visible_len],
-            fft_input_buffer: vec![0; fft_size * 2],
             io_iq_buffer: Vec::new(),
             io_audio_buffer: Vec::new(),
             io_fft_buffer: Vec::new(),
@@ -344,14 +356,9 @@ impl Receiver {
         self.fft_visible_buffer.resize(len, -120.0);
     }
 
-    /// 複素IQのDCキャンセルを有効/無効にする
+    /// FFT表示の DC 近傍補間を有効/無効にする
     pub fn set_dc_cancel_enabled(&mut self, enabled: bool) {
         self.dc_cancel_enabled = enabled;
-    }
-
-    /// FFT入力を処理済みIQに切り替える（falseで生IQ）
-    pub fn set_fft_use_processed(&mut self, enabled: bool) {
-        self.fft_use_processed = enabled;
     }
 
     /// JS から直接読み書きするI/Oバッファを初期化する。
@@ -477,24 +484,11 @@ impl Receiver {
 }
 
 impl Receiver {
-    fn process_no_dc_path(&mut self, iq_data: &[i8], fft_n: usize) {
-        if self.fft_use_processed {
-            self.process_no_dc_with_fft(iq_data, fft_n);
-        } else {
-            self.process_no_dc_without_fft(iq_data);
-        }
-    }
-
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    fn process_no_dc_with_fft(&mut self, iq_data: &[i8], fft_n: usize) {
+    fn mix_iq_to_baseband(&mut self, iq_data: &[i8]) {
         let num_samples = iq_data.len() / 2;
         self.baseband_buffer
             .resize(num_samples, Complex::new(0.0, 0.0));
-
-        let fft_copy_len = fft_n.saturating_mul(2).min(iq_data.len());
-        if fft_copy_len > 0 {
-            self.fft_input_buffer[..fft_copy_len].copy_from_slice(&iq_data[..fft_copy_len]);
-        }
 
         let mut idx = 0usize;
         while idx + 8 <= num_samples {
@@ -546,78 +540,9 @@ impl Receiver {
     }
 
     #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
-    fn process_no_dc_with_fft(&mut self, iq_data: &[i8], fft_n: usize) {
-        for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
-            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
-            let nco_val = self.nco.step();
-            self.baseband_buffer.push(sample * nco_val);
-
-            if idx < fft_n {
-                let n = idx * 2;
-                self.fft_input_buffer[n] = float_to_i8(sample.re);
-                self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
-            }
-        }
-    }
-
-    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-    fn process_no_dc_without_fft(&mut self, iq_data: &[i8]) {
-        let num_samples = iq_data.len() / 2;
-        self.baseband_buffer
-            .resize(num_samples, Complex::new(0.0, 0.0));
-
-        let mut idx = 0usize;
-
-        while idx + 8 <= num_samples {
-            let (x0, x1, x2, x3) =
-                unsafe { unpack_iq16_to_f32x4x4_simd(iq_data.as_ptr().add(idx * 2)) };
-
-            let n0 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n1 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n2 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-            let n3 = {
-                let a = self.nco.step();
-                let b = self.nco.step();
-                f32x4(a.re, a.im, b.re, b.im)
-            };
-
-            let y0 = unsafe { complex_mul_interleaved2_f32_simd(x0, n0) };
-            let y1 = unsafe { complex_mul_interleaved2_f32_simd(x1, n1) };
-            let y2 = unsafe { complex_mul_interleaved2_f32_simd(x2, n2) };
-            let y3 = unsafe { complex_mul_interleaved2_f32_simd(x3, n3) };
-
-            unsafe {
-                let out_f32 = self.baseband_buffer.as_mut_ptr().add(idx) as *mut f32;
-                v128_store(out_f32 as *mut v128, y0);
-                v128_store(out_f32.add(4) as *mut v128, y1);
-                v128_store(out_f32.add(8) as *mut v128, y2);
-                v128_store(out_f32.add(12) as *mut v128, y3);
-            }
-            idx += 8;
-        }
-
-        for out_idx in idx..num_samples {
-            let base = out_idx * 2;
-            let sample = Complex::new(iq_data[base] as f32 / 128.0, iq_data[base + 1] as f32 / 128.0);
-            let nco_val = self.nco.step();
-            self.baseband_buffer[out_idx] = sample * nco_val;
-        }
-    }
-
-    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
-    fn process_no_dc_without_fft(&mut self, iq_data: &[i8]) {
+    fn mix_iq_to_baseband(&mut self, iq_data: &[i8]) {
+        self.baseband_buffer.clear();
+        self.baseband_buffer.reserve(iq_data.len() / 2);
         for iq in iq_data.chunks_exact(2) {
             let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
             let nco_val = self.nco.step();
@@ -626,31 +551,10 @@ impl Receiver {
     }
 
     fn process_internal(&mut self, iq_data: &[i8]) {
-        let num_samples = iq_data.len() / 2;
         let fft_n = self.fft.get_n();
 
-        self.baseband_buffer.clear();
-        self.baseband_buffer.reserve(num_samples);
-
         // ベースバンド処理 & NCO
-        if self.dc_cancel_enabled {
-            for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
-                let i_val = iq[0] as f32 / 128.0;
-                let q_val = iq[1] as f32 / 128.0;
-                let raw_sample = Complex::new(i_val, q_val);
-                let sample = self.dc_canceller.process(raw_sample);
-                let nco_val = self.nco.step();
-                self.baseband_buffer.push(sample * nco_val);
-
-                if self.fft_use_processed && idx < fft_n {
-                    let n = idx * 2;
-                    self.fft_input_buffer[n] = float_to_i8(sample.re);
-                    self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
-                }
-            }
-        } else {
-            self.process_no_dc_path(iq_data, fft_n);
-        }
+        self.mix_iq_to_baseband(iq_data);
 
         // デシメーション (粗段: rx->1Msps, 固定段: 1Msps->demod_rate)
         self.coarse_filter
@@ -706,13 +610,11 @@ impl Receiver {
 
         // FFT (iq_data の先頭 fft_size * 2 要素を使用)
         self.fft_buffer.fill(-120.0);
-        if self.fft_use_processed {
-            if num_samples >= fft_n {
-                self.fft
-                    .fft(&self.fft_input_buffer[0..fft_n * 2], &mut self.fft_buffer);
-            }
-        } else if iq_data.len() >= fft_n * 2 {
+        if iq_data.len() >= fft_n * 2 {
             self.fft.fft(&iq_data[0..fft_n * 2], &mut self.fft_buffer);
+            if self.dc_cancel_enabled {
+                interpolate_fft_dc_bins(&mut self.fft_buffer, FFT_DC_INTERP_HALF_WIDTH);
+            }
         }
         let visible_end = self.fft_visible_start + self.fft_visible_len;
         self.fft_visible_buffer

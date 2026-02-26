@@ -106,7 +106,6 @@ describe('RadioBackend', () => {
 				ifMinHz: 0,
 				ifMaxHz: 4_500,
 				dcCancelEnabled: true,
-				fftUseProcessed: true,
 				ampEnabled: true,
 				antennaEnabled: true,
 				lnaGain: 24,
