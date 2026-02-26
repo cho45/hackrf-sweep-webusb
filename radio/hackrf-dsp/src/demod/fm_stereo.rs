@@ -21,6 +21,8 @@ const PLL_MAX_FREQ_ERR_HZ: f32 = 400.0;
 const PLL_LOCK_ERR_RAD: f32 = 0.35;
 const PLL_LOCK_Q_OVER_I_MAX: f32 = 0.35;
 const LR_PHASE_TRACK_LPF_HZ: f32 = 25.0;
+const LR_PHASE_TRACK_UPDATE_INTERVAL: usize = 8;
+const PILOT_SIDE_UPDATE_INTERVAL: usize = 4;
 
 /// FM MPX から L/R を復元する簡易ステレオデコーダ。
 ///
@@ -53,6 +55,7 @@ pub struct FMStereoDecoder {
     pilot_i_hi_lp: f32,
     pilot_q_hi_lp: f32,
     pilot_lp_alpha: f32,
+    pilot_lp_alpha_side: f32,
     pilot_phase_err_last: f32,
     pll_kp: f32,
     pll_ki: f32,
@@ -69,6 +72,9 @@ pub struct FMStereoDecoder {
     lr2_re_lp: f32,
     lr2_im_lp: f32,
     lr_phase_track_alpha: f32,
+    lr_phase_corr_cos: f32,
+    lr_phase_corr_sin: f32,
+    lr_phase_update_countdown: usize,
 
     deemphasis_alpha: Option<f32>,
     deemphasis_l: f32,
@@ -82,6 +88,7 @@ pub struct FMStereoDecoder {
     pilot_fraction_alpha: f32,
     pilot_quality: f32,
     pilot_quality_alpha: f32,
+    pilot_side_update_countdown: usize,
 
     stereo_blend: f32,
     blend_attack_alpha: f32,
@@ -130,6 +137,8 @@ impl FMStereoDecoder {
         let pilot_lo_omega = 2.0 * std::f32::consts::PI * 18_000.0 / sample_rate_hz;
         let pilot_hi_omega = 2.0 * std::f32::consts::PI * 20_000.0 / sample_rate_hz;
         let pilot_lp_alpha = alpha_from_cutoff(sample_rate_hz, PILOT_DETECT_LPF_HZ);
+        let pilot_lp_alpha_side =
+            1.0 - (1.0 - pilot_lp_alpha).powi(PILOT_SIDE_UPDATE_INTERVAL as i32);
         let dc_hp_a = (-2.0 * std::f32::consts::PI * 30.0 / sample_rate_hz).exp();
         let pilot_level_alpha = alpha_from_tau(sample_rate_hz, 0.02);
         let pilot_power_alpha = alpha_from_tau(sample_rate_hz, 0.02);
@@ -164,6 +173,7 @@ impl FMStereoDecoder {
             pilot_i_hi_lp: 0.0,
             pilot_q_hi_lp: 0.0,
             pilot_lp_alpha,
+            pilot_lp_alpha_side,
             pilot_phase_err_last: 0.0,
             pll_kp,
             pll_ki,
@@ -187,6 +197,9 @@ impl FMStereoDecoder {
             lr2_re_lp: 0.0,
             lr2_im_lp: 0.0,
             lr_phase_track_alpha,
+            lr_phase_corr_cos: 1.0,
+            lr_phase_corr_sin: 0.0,
+            lr_phase_update_countdown: 0,
             deemphasis_alpha,
             deemphasis_l: 0.0,
             deemphasis_r: 0.0,
@@ -198,6 +211,7 @@ impl FMStereoDecoder {
             pilot_fraction_alpha,
             pilot_quality: 0.0,
             pilot_quality_alpha,
+            pilot_side_update_countdown: 0,
             stereo_blend: 0.0,
             blend_attack_alpha,
             blend_release_alpha,
@@ -226,6 +240,7 @@ impl FMStereoDecoder {
         self.pilot_q_hi_lp = 0.0;
         self.pilot_phase_err_last = 0.0;
         self.pll_freq_corr = 0.0;
+        self.pilot_side_update_countdown = 0;
         self.dc_prev_x = 0.0;
         self.dc_prev_y = 0.0;
         self.sum_lpf.reset();
@@ -233,6 +248,9 @@ impl FMStereoDecoder {
         self.diff_q_lpf.reset();
         self.lr2_re_lp = 0.0;
         self.lr2_im_lp = 0.0;
+        self.lr_phase_corr_cos = 1.0;
+        self.lr_phase_corr_sin = 0.0;
+        self.lr_phase_update_countdown = 0;
         self.deemphasis_l = 0.0;
         self.deemphasis_r = 0.0;
         self.pilot_level = 0.0;
@@ -260,55 +278,64 @@ impl FMStereoDecoder {
             self.dc_prev_x = raw;
             self.dc_prev_y = x;
 
-            let c19 = self.pilot_phase.cos();
-            let s19 = self.pilot_phase.sin();
+            let (s19, c19) = self.pilot_phase.sin_cos();
 
             // 19k pilot の複素包絡を推定し、位相オフセットを取り出す。
             // ここで得た位相を 2倍して 38k の同期検波器を作る。
             let pilot_i = x * c19;
             let pilot_q = -x * s19;
             let pilot_mix_power_inst = pilot_i * pilot_i + pilot_q * pilot_q;
-            self.pilot_mix_power += self.pilot_power_alpha * (pilot_mix_power_inst - self.pilot_mix_power);
+            self.pilot_mix_power +=
+                self.pilot_power_alpha * (pilot_mix_power_inst - self.pilot_mix_power);
             self.pilot_i_lp += self.pilot_lp_alpha * (pilot_i - self.pilot_i_lp);
             self.pilot_q_lp += self.pilot_lp_alpha * (pilot_q - self.pilot_q_lp);
 
             // 近傍の 18kHz / 20kHz でも同様の同期検波を行い、ノイズ床推定に使う。
-            let c18 = self.pilot_lo_phase.cos();
-            let s18 = self.pilot_lo_phase.sin();
-            let c20 = self.pilot_hi_phase.cos();
-            let s20 = self.pilot_hi_phase.sin();
-            let pilot_i_lo = x * c18;
-            let pilot_q_lo = -x * s18;
-            let pilot_i_hi = x * c20;
-            let pilot_q_hi = -x * s20;
-            self.pilot_i_lo_lp += self.pilot_lp_alpha * (pilot_i_lo - self.pilot_i_lo_lp);
-            self.pilot_q_lo_lp += self.pilot_lp_alpha * (pilot_q_lo - self.pilot_q_lo_lp);
-            self.pilot_i_hi_lp += self.pilot_lp_alpha * (pilot_i_hi - self.pilot_i_hi_lp);
-            self.pilot_q_hi_lp += self.pilot_lp_alpha * (pilot_q_hi - self.pilot_q_hi_lp);
+            if self.pilot_side_update_countdown == 0 {
+                let (s18, c18) = self.pilot_lo_phase.sin_cos();
+                let (s20, c20) = self.pilot_hi_phase.sin_cos();
+                let pilot_i_lo = x * c18;
+                let pilot_q_lo = -x * s18;
+                let pilot_i_hi = x * c20;
+                let pilot_q_hi = -x * s20;
+                self.pilot_i_lo_lp += self.pilot_lp_alpha_side * (pilot_i_lo - self.pilot_i_lo_lp);
+                self.pilot_q_lo_lp += self.pilot_lp_alpha_side * (pilot_q_lo - self.pilot_q_lo_lp);
+                self.pilot_i_hi_lp += self.pilot_lp_alpha_side * (pilot_i_hi - self.pilot_i_hi_lp);
+                self.pilot_q_hi_lp += self.pilot_lp_alpha_side * (pilot_q_hi - self.pilot_q_hi_lp);
+                self.pilot_side_update_countdown = PILOT_SIDE_UPDATE_INTERVAL - 1;
+            } else {
+                self.pilot_side_update_countdown -= 1;
+            }
 
             let pilot_phase_err = pilot_phase_error_from_iq(self.pilot_i_lp, self.pilot_q_lp);
             self.pilot_phase_err_last = pilot_phase_err;
             // 2次PLL: 位相誤差でNCOの周波数補正を更新し、狭帯域で安定追従させる。
-            self.pll_freq_corr =
-                (self.pll_freq_corr + self.pll_ki * pilot_phase_err).clamp(-self.pll_freq_corr_max, self.pll_freq_corr_max);
+            self.pll_freq_corr = (self.pll_freq_corr + self.pll_ki * pilot_phase_err)
+                .clamp(-self.pll_freq_corr_max, self.pll_freq_corr_max);
             let pilot_phase_locked = self.pilot_phase + pilot_phase_err;
-            let pilot_coherent_power = self.pilot_i_lp * self.pilot_i_lp + self.pilot_q_lp * self.pilot_q_lp;
+            let pilot_coherent_power =
+                self.pilot_i_lp * self.pilot_i_lp + self.pilot_q_lp * self.pilot_q_lp;
             let pilot_side_power = 0.5
-                * ((self.pilot_i_lo_lp * self.pilot_i_lo_lp + self.pilot_q_lo_lp * self.pilot_q_lo_lp)
-                    + (self.pilot_i_hi_lp * self.pilot_i_hi_lp + self.pilot_q_hi_lp * self.pilot_q_hi_lp));
+                * ((self.pilot_i_lo_lp * self.pilot_i_lo_lp
+                    + self.pilot_q_lo_lp * self.pilot_q_lo_lp)
+                    + (self.pilot_i_hi_lp * self.pilot_i_hi_lp
+                        + self.pilot_q_hi_lp * self.pilot_q_hi_lp));
             let pilot_level_inst = pilot_coherent_power.sqrt() * 2.0;
             self.pilot_level += self.pilot_level_alpha * (pilot_level_inst - self.pilot_level);
             let pilot_fraction_inst = pilot_coherent_power / (self.pilot_mix_power + 1e-9);
-            self.pilot_fraction += self.pilot_fraction_alpha * (pilot_fraction_inst - self.pilot_fraction);
+            self.pilot_fraction +=
+                self.pilot_fraction_alpha * (pilot_fraction_inst - self.pilot_fraction);
             let pilot_quality_inst = pilot_coherent_power / (pilot_side_power + 1e-9);
-            self.pilot_quality += self.pilot_quality_alpha * (pilot_quality_inst - self.pilot_quality);
+            self.pilot_quality +=
+                self.pilot_quality_alpha * (pilot_quality_inst - self.pilot_quality);
 
             let level_denom = (self.pilot_lock_high - self.pilot_lock_low).max(1e-6);
             let frac_denom = (self.pilot_fraction_high - self.pilot_fraction_low).max(1e-6);
             let level_gate = clamp01((self.pilot_level - self.pilot_lock_low) / level_denom);
             let frac_gate = clamp01((self.pilot_fraction - self.pilot_fraction_low) / frac_denom);
             let quality_denom = (self.pilot_quality_high - self.pilot_quality_low).max(1e-6);
-            let quality_gate = clamp01((self.pilot_quality - self.pilot_quality_low) / quality_denom);
+            let quality_gate =
+                clamp01((self.pilot_quality - self.pilot_quality_low) / quality_denom);
             let target_blend = level_gate * quality_gate * frac_gate;
             let blend_alpha = if target_blend > self.stereo_blend {
                 self.blend_attack_alpha
@@ -332,8 +359,7 @@ impl FMStereoDecoder {
             // - 入力: 38±15kHz の帯域（23..53kHz）
             // - 同期検波後: 0..15kHz (+ 2*38k 近傍の高域項)
             // - 後段LPFで 0..15kHz を取り出す
-            let c38 = (2.0 * pilot_phase_locked).cos();
-            let s38 = (2.0 * pilot_phase_locked).sin();
+            let (s38, c38) = (2.0 * pilot_phase_locked).sin_cos();
             let lr_i_raw = 2.0 * x * c38;
             let lr_q_raw = -2.0 * x * s38;
 
@@ -350,10 +376,16 @@ impl FMStereoDecoder {
             let lr2_im = 2.0 * diff_i * diff_q;
             self.lr2_re_lp += self.lr_phase_track_alpha * (lr2_re - self.lr2_re_lp);
             self.lr2_im_lp += self.lr_phase_track_alpha * (lr2_im - self.lr2_im_lp);
-            let lr_phase_corr = 0.5 * self.lr2_im_lp.atan2(self.lr2_re_lp);
-            let c_lr = lr_phase_corr.cos();
-            let s_lr = lr_phase_corr.sin();
-            let lr_aligned = diff_i * c_lr + diff_q * s_lr;
+            if self.lr_phase_update_countdown == 0 {
+                let lr_phase_corr = 0.5 * self.lr2_im_lp.atan2(self.lr2_re_lp);
+                let (s_lr, c_lr) = lr_phase_corr.sin_cos();
+                self.lr_phase_corr_cos = c_lr;
+                self.lr_phase_corr_sin = s_lr;
+                self.lr_phase_update_countdown = LR_PHASE_TRACK_UPDATE_INTERVAL - 1;
+            } else {
+                self.lr_phase_update_countdown -= 1;
+            }
+            let lr_aligned = diff_i * self.lr_phase_corr_cos + diff_q * self.lr_phase_corr_sin;
 
             // lock 品質に応じて blend を掛け、誤ロック時は差分成分を自動で弱める。
             let lr = lr_aligned * self.stereo_blend;
@@ -462,8 +494,7 @@ mod tests {
             let lp = left[i] + right[i];
             let lr = left[i] - right[i];
             let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t + pilot_phase).cos();
-            let dsb =
-                lr * (2.0 * std::f32::consts::PI * 38_000.0 * t + 2.0 * pilot_phase).cos();
+            let dsb = lr * (2.0 * std::f32::consts::PI * 38_000.0 * t + 2.0 * pilot_phase).cos();
             mpx.push(0.45 * lp + pilot + 0.45 * dsb);
         }
         mpx
@@ -735,7 +766,11 @@ mod tests {
         );
 
         let st = dec.stats();
-        assert!(st.stereo_blend > 0.5, "stereo blend did not rise enough: {}", st.stereo_blend);
+        assert!(
+            st.stereo_blend > 0.5,
+            "stereo blend did not rise enough: {}",
+            st.stereo_blend
+        );
         assert!(st.stereo_locked, "stereo did not lock");
     }
 
@@ -749,7 +784,11 @@ mod tests {
         dec.process(&mpx, &mut l, &mut r);
 
         let st = dec.stats();
-        assert!(st.stereo_locked, "stereo should lock on clean multiplex: {:?}", st);
+        assert!(
+            st.stereo_locked,
+            "stereo should lock on clean multiplex: {:?}",
+            st
+        );
         assert!(
             st.stereo_blend > 0.75,
             "stereo blend too low on clean multiplex: {:?}",
@@ -846,8 +885,14 @@ mod tests {
 
         dec.process(&no_pilot, &mut l, &mut r);
         let st2 = dec.stats();
-        assert!(st2.mono_fallback_count >= 1, "fallback count did not increment");
-        assert!(st2.stereo_blend < st1.stereo_blend, "blend should decay after pilot loss");
+        assert!(
+            st2.mono_fallback_count >= 1,
+            "fallback count did not increment"
+        );
+        assert!(
+            st2.stereo_blend < st1.stereo_blend,
+            "blend should decay after pilot loss"
+        );
     }
 
     #[test]
@@ -924,8 +969,7 @@ mod tests {
             assert!(
                 !st.stereo_locked,
                 "decoder locked on chunked noise (seed={}): {:?}",
-                seed,
-                st
+                seed, st
             );
             assert!(
                 peak_blend < 0.35,
@@ -954,7 +998,11 @@ mod tests {
         let mut r = Vec::new();
         dec.process(&lock_input, &mut l, &mut r);
         let st_lock = dec.stats();
-        assert!(st_lock.stereo_locked, "decoder did not lock before pilot-only segment: {:?}", st_lock);
+        assert!(
+            st_lock.stereo_locked,
+            "decoder did not lock before pilot-only segment: {:?}",
+            st_lock
+        );
 
         dec.process(&pure_pilot_like, &mut l, &mut r);
         let st = dec.stats();

@@ -8,8 +8,8 @@ use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
 use crate::{
-    build_decimation_plan, compute_fir_taps, sanitize_if_band, AM_AUDIO_CUTOFF_HZ, DemodMode,
-    FM_AUDIO_CUTOFF_HZ, FM_MAX_DEVIATION_HZ,
+    build_decimation_plan, compute_fir_taps, sanitize_if_band, DemodMode, Receiver,
+    AM_AUDIO_CUTOFF_HZ, FM_AUDIO_CUTOFF_HZ, FM_MAX_DEVIATION_HZ,
 };
 
 const IQ_BYTES_PER_BLOCK: usize = 262_144;
@@ -93,7 +93,10 @@ fn print_front_stage(name: &str, stage_ns: u128, probe_total_ns: u128, blocks: u
     } else {
         0.0
     };
-    println!("  {:>11}: {:>7.3} ms ({:>5.1}% of probe)", name, avg_ms, ratio);
+    println!(
+        "  {:>11}: {:>7.3} ms ({:>5.1}% of probe)",
+        name, avg_ms, ratio
+    );
 }
 
 struct FrontProfiler {
@@ -300,8 +303,7 @@ fn run_case(case: BenchCase) {
         plan.demod_sample_rate
     );
     print_stage("front", stats.front_ns, stats.total_ns, MEASURE_BLOCKS);
-    let front_probe_total =
-        stats.front_unpack_ns + stats.front_mix_ns + stats.front_fft_pack_ns;
+    let front_probe_total = stats.front_unpack_ns + stats.front_mix_ns + stats.front_fft_pack_ns;
     print_stage(
         "front_probe",
         front_probe_total,
@@ -327,13 +329,186 @@ fn run_case(case: BenchCase) {
         MEASURE_BLOCKS,
     );
     print_stage("coarse", stats.coarse_ns, stats.total_ns, MEASURE_BLOCKS);
-    print_stage("demod_decim", stats.demod_decim_ns, stats.total_ns, MEASURE_BLOCKS);
+    print_stage(
+        "demod_decim",
+        stats.demod_decim_ns,
+        stats.total_ns,
+        MEASURE_BLOCKS,
+    );
     print_stage("demod", stats.demod_ns, stats.total_ns, MEASURE_BLOCKS);
-    print_stage("resample", stats.resample_ns, stats.total_ns, MEASURE_BLOCKS);
+    print_stage(
+        "resample",
+        stats.resample_ns,
+        stats.total_ns,
+        MEASURE_BLOCKS,
+    );
     print_stage("fft", stats.fft_ns, stats.total_ns, MEASURE_BLOCKS);
     println!(
         "  {:>11}: {:>7.3} ms  blocks/s={:>6.1}  IQ MB/s={:>6.2}",
         "total", avg_total_ms, blocks_per_sec, iq_mb_s
+    );
+    println!();
+}
+
+fn run_receiver_fm_case(sample_rate: f32, stereo_enabled: bool) -> (f64, f64, f64) {
+    let mut rx = Receiver::new(
+        sample_rate,
+        100_000_000.0,
+        100_000_000.0,
+        "FM",
+        AUDIO_SAMPLE_RATE as f32,
+        FFT_SIZE,
+        0,
+        FFT_SIZE,
+        0.0,
+        98_000.0,
+        true,
+    );
+    rx.set_fm_stereo_enabled(stereo_enabled);
+    let mut audio_out = vec![0.0f32; 262_144];
+    let mut fft_out = vec![0.0f32; FFT_SIZE];
+
+    let total_blocks = WARMUP_BLOCKS + MEASURE_BLOCKS;
+    let mut sum_ms = 0.0f64;
+    let mut peak_ms = 0.0f64;
+    let mut samples = Vec::with_capacity(MEASURE_BLOCKS);
+
+    for block in 0..total_blocks {
+        let iq = generate_iq_block(sample_rate, block, DemodMode::Fm);
+
+        let t0 = Instant::now();
+        let _ = rx.process_into(&iq, &mut audio_out, &mut fft_out);
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        if block >= WARMUP_BLOCKS {
+            sum_ms += ms;
+            peak_ms = peak_ms.max(ms);
+            samples.push(ms);
+        }
+    }
+
+    let avg_ms = sum_ms / MEASURE_BLOCKS as f64;
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let p95_idx = ((samples.len() as f64) * 0.95).floor() as usize;
+    let p95_ms = samples[p95_idx.min(samples.len().saturating_sub(1))];
+    (avg_ms, p95_ms, peak_ms)
+}
+
+fn run_receiver_fm_stereo_bench() {
+    println!("receiver FM mono/stereo benchmark (process_iq_len only)");
+    for sr in [10_000_000.0f32, 20_000_000.0f32] {
+        let (mono_avg, mono_p95, mono_peak) = run_receiver_fm_case(sr, false);
+        let (st_avg, st_p95, st_peak) = run_receiver_fm_case(sr, true);
+        let ratio = if mono_avg > 0.0 {
+            st_avg / mono_avg
+        } else {
+            0.0
+        };
+        println!(
+            "  rx={:.1}Msps  mono avg/p95/peak={:.3}/{:.3}/{:.3} ms  stereo avg/p95/peak={:.3}/{:.3}/{:.3} ms  x{:.2}",
+            sr / 1_000_000.0,
+            mono_avg,
+            mono_p95,
+            mono_peak,
+            st_avg,
+            st_p95,
+            st_peak,
+            ratio
+        );
+    }
+    println!();
+}
+
+fn fir_step_old(delay: &mut [f32], coeffs: &[f32], pos: &mut usize, x: f32) -> f32 {
+    delay[*pos] = x;
+    let mut acc = 0.0f32;
+    let mut idx = *pos;
+    for &h in coeffs {
+        acc += h * delay[idx];
+        idx = if idx == 0 { delay.len() - 1 } else { idx - 1 };
+    }
+    *pos += 1;
+    if *pos >= delay.len() {
+        *pos = 0;
+    }
+    acc
+}
+
+fn fir_step_split(delay: &mut [f32], coeffs: &[f32], pos: &mut usize, x: f32) -> f32 {
+    delay[*pos] = x;
+    let mut acc = 0.0f32;
+    let mut c = 0usize;
+    for &s in delay[..=*pos].iter().rev() {
+        acc += coeffs[c] * s;
+        c += 1;
+    }
+    for &s in delay[*pos + 1..].iter().rev() {
+        acc += coeffs[c] * s;
+        c += 1;
+    }
+    *pos += 1;
+    if *pos >= delay.len() {
+        *pos = 0;
+    }
+    acc
+}
+
+fn run_fir_kernel_bench() {
+    const TAPS: usize = 128;
+    const WARMUP: usize = 20_000;
+    const ITER: usize = 1_000_000;
+
+    let mut coeffs = vec![0.0f32; TAPS];
+    for (i, c) in coeffs.iter_mut().enumerate() {
+        let t = i as f32 / (TAPS - 1) as f32;
+        *c = (1.0 - (2.0 * std::f32::consts::PI * t).cos()) * 0.5;
+    }
+    let norm = coeffs.iter().sum::<f32>().max(1e-9);
+    for c in &mut coeffs {
+        *c /= norm;
+    }
+    let input: Vec<f32> = (0..(WARMUP + ITER))
+        .map(|i| ((2.0 * std::f32::consts::PI * (i as f32) / 97.0).sin() * 0.7) as f32)
+        .collect();
+
+    let mut delay_old = vec![0.0f32; TAPS];
+    let mut pos_old = 0usize;
+    let mut delay_new = vec![0.0f32; TAPS];
+    let mut pos_new = 0usize;
+
+    for &x in &input[..WARMUP] {
+        black_box(fir_step_old(&mut delay_old, &coeffs, &mut pos_old, x));
+        black_box(fir_step_split(&mut delay_new, &coeffs, &mut pos_new, x));
+    }
+
+    let t_old = Instant::now();
+    let mut y_old = 0.0f32;
+    for &x in &input[WARMUP..] {
+        y_old += fir_step_old(&mut delay_old, &coeffs, &mut pos_old, x);
+    }
+    let old_ns = t_old.elapsed().as_nanos();
+
+    let t_new = Instant::now();
+    let mut y_new = 0.0f32;
+    for &x in &input[WARMUP..] {
+        y_new += fir_step_split(&mut delay_new, &coeffs, &mut pos_new, x);
+    }
+    let new_ns = t_new.elapsed().as_nanos();
+
+    black_box(y_old);
+    black_box(y_new);
+
+    let old_ns_per = old_ns as f64 / ITER as f64;
+    let new_ns_per = new_ns as f64 / ITER as f64;
+    let speedup = if new_ns_per > 0.0 {
+        old_ns_per / new_ns_per
+    } else {
+        0.0
+    };
+    println!("FIR kernel microbench ({} taps):", TAPS);
+    println!(
+        "  old={:.2} ns/sample  new={:.2} ns/sample  speedup x{:.2}",
+        old_ns_per, new_ns_per, speedup
     );
     println!();
 }
@@ -376,4 +551,6 @@ pub fn run_default_pipeline_bench() {
     for case in cases {
         run_case(case);
     }
+    run_fir_kernel_bench();
+    run_receiver_fm_stereo_bench();
 }
