@@ -3,8 +3,8 @@
 
 mod dc;
 mod demod;
-mod filter;
 mod fft;
+mod filter;
 mod resample;
 
 use num_complex::Complex;
@@ -25,6 +25,7 @@ const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
 /// モード別の復調レート [Hz]
 const AM_DEMOD_RATE: f32 = 50_000.0;
 const FM_DEMOD_RATE: f32 = 200_000.0;
+const COARSE_STAGE_RATE: f32 = 1_000_000.0;
 
 #[wasm_bindgen]
 extern "C" {
@@ -62,11 +63,35 @@ fn compute_fir_taps(factor: usize) -> usize {
     raw | 1 // 奇数保証
 }
 
+struct DecimationPlan {
+    target_demod_rate: f32,
+    coarse_factor: usize,
+    coarse_stage_rate: f32,
+    demod_factor: usize,
+    demod_sample_rate: f32,
+}
+
+fn build_decimation_plan(sample_rate: f32, mode: DemodMode) -> DecimationPlan {
+    let target_demod_rate = mode.demod_rate();
+    let coarse_factor = (sample_rate / COARSE_STAGE_RATE).round().max(1.0) as usize;
+    let coarse_stage_rate = sample_rate / coarse_factor as f32;
+    let demod_factor = (coarse_stage_rate / target_demod_rate).round().max(1.0) as usize;
+    let demod_sample_rate = coarse_stage_rate / demod_factor as f32;
+    DecimationPlan {
+        target_demod_rate,
+        coarse_factor,
+        coarse_stage_rate,
+        demod_factor,
+        demod_sample_rate,
+    }
+}
+
 /// JS側から呼び出されるラジオのメインDSPレシーバ
 #[wasm_bindgen]
 pub struct Receiver {
     sample_rate: f32,
-    decimated_sample_rate: f32,
+    coarse_stage_rate: f32,
+    demod_sample_rate: f32,
     if_min_hz: f32,
     if_max_hz: f32,
     dc_cancel_enabled: bool,
@@ -76,7 +101,8 @@ pub struct Receiver {
     mode: DemodMode,
     nco: Nco,
     dc_canceller: DcCanceller,
-    filter: DecimationFilter,
+    coarse_filter: DecimationFilter,
+    demod_filter: DecimationFilter,
     am_demod: AMDemodulator,
     fm_demod: FMDemodulator,
     resampler: Resampler,
@@ -91,8 +117,8 @@ pub struct Receiver {
     fft_input_buffer: Vec<i8>,
 }
 
-fn sanitize_if_band(min_hz: f32, max_hz: f32, decimated_sample_rate: f32) -> (f32, f32) {
-    let max_allowed = (decimated_sample_rate * 0.49).max(200.0);
+fn sanitize_if_band(min_hz: f32, max_hz: f32, demod_sample_rate: f32) -> (f32, f32) {
+    let max_allowed = (demod_sample_rate * 0.49).max(200.0);
     let mut min = min_hz.max(0.0);
     let mut max = max_hz.max(0.0);
 
@@ -143,29 +169,32 @@ impl Receiver {
         console_error_panic_hook::set_once();
 
         let mode = DemodMode::from_str(demod_mode).unwrap_or(DemodMode::Am);
-        let target_demod_rate = mode.demod_rate();
+        let plan = build_decimation_plan(sample_rate, mode);
 
-        // rxSampleRate から demod_rate に整数デシメーションする factor を算出
-        let decimation_factor = (sample_rate / target_demod_rate).round().max(1.0) as usize;
-        let decimated_sample_rate = sample_rate / decimation_factor as f32;
-
-        let (if_min_hz, if_max_hz) = sanitize_if_band(if_min_hz, if_max_hz, decimated_sample_rate);
+        let (if_min_hz, if_max_hz) = sanitize_if_band(if_min_hz, if_max_hz, plan.demod_sample_rate);
 
         let offset_hz = target_freq - center_freq;
 
-        // FIR タップ数を factor に基づいて算出
-        let fir_taps = compute_fir_taps(decimation_factor);
-        let min_cutoff_norm = if_min_hz / sample_rate;
-        let max_cutoff_norm = if_max_hz / sample_rate;
+        // 粗段: 1Msps正規化は軽量boxcarデシメーション、固定段はモード別FIR。
+        let demod_fir_taps = compute_fir_taps(plan.demod_factor);
+        let min_cutoff_norm = if_min_hz / plan.coarse_stage_rate;
+        let max_cutoff_norm = if_max_hz / plan.coarse_stage_rate;
 
         log(&format!(
-            "[Receiver::new] mode={:?} sr={} demod_rate={} factor={} dec_sr={} fir_taps={} if=[{},{}] cutoff_norm=[{},{}]",
-            mode, sample_rate, target_demod_rate, decimation_factor, decimated_sample_rate,
-            fir_taps, if_min_hz, if_max_hz, min_cutoff_norm, max_cutoff_norm
+            "[Receiver::new] mode={:?} sr={} coarse_factor={} coarse_sr={} demod_factor={} demod_sr={} target_demod_rate={} if=[{},{}]",
+            mode,
+            sample_rate,
+            plan.coarse_factor,
+            plan.coarse_stage_rate,
+            plan.demod_factor,
+            plan.demod_sample_rate,
+            plan.target_demod_rate,
+            if_min_hz,
+            if_max_hz
         ));
 
         let resampler = Resampler::new(
-            decimated_sample_rate.round() as u32,
+            plan.demod_sample_rate.round() as u32,
             output_sample_rate.round() as u32,
         );
 
@@ -176,8 +205,7 @@ impl Receiver {
         } else {
             for (i, w) in window.iter_mut().enumerate() {
                 *w = 0.5
-                    * (1.0
-                        - (2.0 * std::f32::consts::PI * i as f32 / (fft_size - 1) as f32).cos());
+                    * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (fft_size - 1) as f32).cos());
             }
         }
 
@@ -186,7 +214,8 @@ impl Receiver {
 
         Self {
             sample_rate,
-            decimated_sample_rate,
+            coarse_stage_rate: plan.coarse_stage_rate,
+            demod_sample_rate: plan.demod_sample_rate,
             if_min_hz,
             if_max_hz,
             dc_cancel_enabled,
@@ -196,13 +225,35 @@ impl Receiver {
             mode,
             nco: Nco::new(-offset_hz, sample_rate),
             dc_canceller: DcCanceller::new(sample_rate, FIXED_DC_NOTCH_Q),
-            filter: {
-                let f = DecimationFilter::new_fir_band(decimation_factor, fir_taps, min_cutoff_norm, max_cutoff_norm);
-                log(&format!("[Filter] dc_gain={:.6} num_coeffs={}", f.coeffs_dc_gain(), fir_taps));
+            coarse_filter: {
+                let f = DecimationFilter::new_boxcar(plan.coarse_factor);
+                log(&format!(
+                    "[CoarseFilter] type=boxcar factor={} dc_gain={:.6} num_coeffs={}",
+                    plan.coarse_factor,
+                    f.coeffs_dc_gain(),
+                    plan.coarse_factor
+                ));
+                f
+            },
+            demod_filter: {
+                let f = DecimationFilter::new_fir_band(
+                    plan.demod_factor,
+                    demod_fir_taps,
+                    min_cutoff_norm,
+                    max_cutoff_norm,
+                );
+                log(&format!(
+                    "[DemodFilter] factor={} band_norm=[{},{}] dc_gain={:.6} num_coeffs={}",
+                    plan.demod_factor,
+                    min_cutoff_norm,
+                    max_cutoff_norm,
+                    f.coeffs_dc_gain(),
+                    demod_fir_taps
+                ));
                 f
             },
             am_demod: AMDemodulator::new(),
-            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, decimated_sample_rate),
+            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate),
             resampler,
             fft: FFT::new(fft_size, &window),
             baseband_buffer: Vec::with_capacity(131_072),
@@ -222,11 +273,13 @@ impl Receiver {
 
     /// IFチャンネルフィルタの通過帯域を変更する（Hz）
     pub fn set_if_band(&mut self, min_hz: f32, max_hz: f32) {
-        let (min_hz, max_hz) = sanitize_if_band(min_hz, max_hz, self.decimated_sample_rate);
+        let (min_hz, max_hz) = sanitize_if_band(min_hz, max_hz, self.demod_sample_rate);
         self.if_min_hz = min_hz;
         self.if_max_hz = max_hz;
-        self.filter
-            .set_fir_bandpass(self.if_min_hz / self.sample_rate, self.if_max_hz / self.sample_rate);
+        self.demod_filter.set_fir_bandpass(
+            self.if_min_hz / self.coarse_stage_rate,
+            self.if_max_hz / self.coarse_stage_rate,
+        );
     }
 
     /// FFT表示窓（開始binと幅）を設定する
@@ -276,14 +329,15 @@ impl Receiver {
             }
         }
 
-        // デシメーション (LPF + Downsampling)
-        let decimated = self.filter.process(&self.baseband_buffer);
+        // デシメーション (粗段: rx->1Msps, 固定段: 1Msps->demod_rate)
+        let coarse_decimated = self.coarse_filter.process(&self.baseband_buffer);
+        let demod_iq = self.demod_filter.process(&coarse_decimated);
 
         // 復調（モードに応じて分岐）
-        self.demod_buffer.resize(decimated.len(), 0.0);
+        self.demod_buffer.resize(demod_iq.len(), 0.0);
         match self.mode {
-            DemodMode::Am => self.am_demod.demodulate(&decimated, &mut self.demod_buffer),
-            DemodMode::Fm => self.fm_demod.demodulate(&decimated, &mut self.demod_buffer),
+            DemodMode::Am => self.am_demod.demodulate(&demod_iq, &mut self.demod_buffer),
+            DemodMode::Fm => self.fm_demod.demodulate(&demod_iq, &mut self.demod_buffer),
         }
 
         // リサンプリング (demod_rate -> audioCtx.sampleRate)
@@ -293,7 +347,8 @@ impl Receiver {
                 * self.resampler.target_rate as f32
                 * 1.5) as usize,
         );
-        self.resampler.process(&self.demod_buffer, &mut self.audio_buffer);
+        self.resampler
+            .process(&self.demod_buffer, &mut self.audio_buffer);
 
         // デバッグログ（最初の5ブロックのみ）
         {
@@ -301,9 +356,14 @@ impl Receiver {
             let count = LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if count < 5 {
                 // NCO後のDC成分（信号がDCにあるか検証）
-                let bb_dc = self.baseband_buffer.iter().sum::<Complex<f32>>() / self.baseband_buffer.len().max(1) as f32;
-                let dec_peak = decimated.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
-                let demod_peak = self.demod_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
+                let bb_dc = self.baseband_buffer.iter().sum::<Complex<f32>>()
+                    / self.baseband_buffer.len().max(1) as f32;
+                let dec_peak = demod_iq.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
+                let demod_peak = self
+                    .demod_buffer
+                    .iter()
+                    .map(|s| s.abs())
+                    .fold(0.0f32, f32::max);
                 log(&format!(
                     "[process#{}] bb_dc={:.4}+{:.4}j (mag={:.4}) dec_peak={:.4} demod_peak={:.4} audio_len={}",
                     count, bb_dc.re, bb_dc.im, bb_dc.norm(), dec_peak, demod_peak, self.audio_buffer.len()
@@ -327,8 +387,59 @@ impl Receiver {
 
         let out_array = js_sys::Array::new();
         out_array.push(&js_sys::Float32Array::from(self.audio_buffer.as_slice()));
-        out_array.push(&js_sys::Float32Array::from(self.fft_visible_buffer.as_slice()));
+        out_array.push(&js_sys::Float32Array::from(
+            self.fft_visible_buffer.as_slice(),
+        ));
 
         out_array
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn approx_eq(a: f32, b: f32) {
+        let diff = (a - b).abs();
+        assert!(diff < 1e-3, "lhs={} rhs={} diff={}", a, b, diff);
+    }
+
+    #[test]
+    fn decimation_plan_fits_candidate_rates_for_am() {
+        for (sr, expected_coarse) in [
+            (2_000_000.0, 2usize),
+            (4_000_000.0, 4usize),
+            (8_000_000.0, 8usize),
+            (10_000_000.0, 10usize),
+            (20_000_000.0, 20usize),
+        ] {
+            let plan = build_decimation_plan(sr, DemodMode::Am);
+            assert_eq!(plan.coarse_factor, expected_coarse);
+            assert_eq!(plan.demod_factor, 20);
+            approx_eq(plan.coarse_stage_rate, 1_000_000.0);
+            approx_eq(plan.demod_sample_rate, AM_DEMOD_RATE);
+        }
+    }
+
+    #[test]
+    fn decimation_plan_fits_candidate_rates_for_fm() {
+        for sr in [
+            2_000_000.0,
+            4_000_000.0,
+            8_000_000.0,
+            10_000_000.0,
+            20_000_000.0,
+        ] {
+            let plan = build_decimation_plan(sr, DemodMode::Fm);
+            assert_eq!(plan.demod_factor, 5);
+            approx_eq(plan.coarse_stage_rate, 1_000_000.0);
+            approx_eq(plan.demod_sample_rate, FM_DEMOD_RATE);
+        }
+    }
+
+    #[test]
+    fn sanitize_if_band_is_bounded_by_demod_rate() {
+        let (_, max) = sanitize_if_band(0.0, 200_000.0, AM_DEMOD_RATE);
+        assert!(max <= AM_DEMOD_RATE * 0.49);
     }
 }

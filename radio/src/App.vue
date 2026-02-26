@@ -87,6 +87,22 @@
         {{ info.boardName }}<br>
         {{ info.firmwareVersion }}
       </div>
+      <div class="perf-panel body-2" v-if="running">
+        <div><b>DSP</b></div>
+        <div>blocks/s: {{ fmtNum(dspPerf.blocksPerSec, 1) }}</div>
+        <div>process ms(avg/max): {{ fmtNum(dspPerf.dspProcessMsAvg, 2) }} / {{ fmtNum(dspPerf.dspProcessMsMax, 2) }}</div>
+        <div>cb ms(avg/max): {{ fmtNum(dspPerf.callbackMsAvg, 2) }} / {{ fmtNum(dspPerf.callbackMsMax, 2) }}</div>
+        <div>IQ MB/s: {{ fmtNum(dspPerf.iqBytesPerSec / 1_000_000, 2) }}</div>
+
+        <div style="margin-top: 8px;"><b>Draw</b></div>
+        <div>fps: {{ fmtNum(drawPerf.fps, 1) }}</div>
+        <div>draw ms(avg/max): {{ fmtNum(drawPerf.drawMsAvg, 2) }} / {{ fmtNum(drawPerf.drawMsMax, 2) }}</div>
+
+        <div style="margin-top: 8px;"><b>Audio</b></div>
+        <div>buffer: {{ fmtNum(audioPerf.bufferedMs, 1) }} ms</div>
+        <div>queue: {{ fmtInt(audioPerf.queueLength) }} / underrun: {{ fmtInt(audioPerf.underrunCount) }}</div>
+        <div>dropped: {{ fmtInt(audioPerf.droppedSamples) }} samples</div>
+      </div>
 
       <div class="snackbar" :class="{ show: snackbar.show }">
         {{ snackbar.message }}
@@ -140,7 +156,7 @@ const minTuneFreqHz = 1_000_000;
 const minDisplayBandwidthHz = 100_000;
 const maxHackRFSampleRate = 20_000_000;
 const minHackRFSampleRate = 2_000_000;
-const sampleRateStepHz = 100_000;
+const rxSampleRateCandidatesHz = [2_000_000, 4_000_000, 8_000_000, 10_000_000, 20_000_000] as const;
 const ifOffsetHz = 250_000; // target からこの分だけRF centerをずらしてDC回避
 
 const settingsStorageKey = 'radio.settings.v2';
@@ -219,7 +235,7 @@ const defaultIfBandForMode = (mode: string): { minHz: number; maxHz: number } =>
   return mode === 'FM' ? { minHz: 0, maxHz: 75_000 } : { minHz: 0, maxHz: 4_500 };
 };
 
-const maxSpanHz = maxHackRFSampleRate - 2 * Math.abs(ifOffsetHz);
+const maxSpanHz = maxHackRFSampleRate;
 const ifBand = computed(() => defaultIfBandForMode(demodMode.value));
 const ifMinHz = computed(() => ifBand.value.minHz);
 const ifMaxHz = computed(() => ifBand.value.maxHz);
@@ -231,6 +247,19 @@ const ncoOffset = computed(() => targetFreq.value - rfCenterFreq.value);
 
 type KeypadField = 'target' | 'span';
 type DisplayUnit = 'Hz' | 'kHz' | 'MHz';
+type DspPerfStats = {
+  windowMs: number;
+  blocks: number;
+  blocksPerSec: number;
+  iqBytesPerSec: number;
+  blockIntervalMsAvg: number;
+  blockIntervalMsMax: number;
+  dspProcessMsAvg: number;
+  dspProcessMsMax: number;
+  callbackMsAvg: number;
+  callbackMsMax: number;
+  audioSamplesPerSec: number;
+};
 const keypadField = ref<KeypadField | null>(null);
 const keypadOpenToken = ref(0);
 const keypadTitle = computed(() =>
@@ -276,12 +305,38 @@ let renderLoopId: number | null = null;
 let renderLastTimeMs = 0;
 const waterfallFps = 30;
 const waterfallFrameIntervalMs = 1000 / waterfallFps;
+let drawWindowStartMs = 0;
+let drawFrameCount = 0;
+let drawMsSum = 0;
+let drawMsMax = 0;
+const dspPerf = reactive({
+  blocksPerSec: 0,
+  iqBytesPerSec: 0,
+  dspProcessMsAvg: 0,
+  dspProcessMsMax: 0,
+  callbackMsAvg: 0,
+  callbackMsMax: 0,
+});
+const drawPerf = reactive({
+  fps: 0,
+  drawMsAvg: 0,
+  drawMsMax: 0,
+});
+const audioPerf = reactive({
+  bufferedMs: 0,
+  queueLength: 0,
+  underrunCount: 0,
+  droppedSamples: 0,
+});
 
 const showSnackbar = (msg: string) => {
   snackbar.message = msg;
   snackbar.show = true;
   setTimeout(() => { snackbar.show = false; }, 3000);
 };
+
+const fmtNum = (v: number, digits = 2) => Number.isFinite(v) ? v.toFixed(digits) : '-';
+const fmtInt = (v: number) => Number.isFinite(v) ? String(Math.round(v)) : '-';
 
 // 桁合わせ用のヘルパー
 const formatFreq = (hz: number) => {
@@ -297,8 +352,9 @@ const formatInputFreq = (hz: number) => {
 };
 
 const chooseSampleRate = (requiredBandwidth: number) => {
-  const stepped = Math.ceil(requiredBandwidth / sampleRateStepHz) * sampleRateStepHz;
-  return Math.max(minHackRFSampleRate, Math.min(maxHackRFSampleRate, stepped));
+  const required = Math.max(minHackRFSampleRate, requiredBandwidth);
+  const selected = rxSampleRateCandidatesHz.find((rate) => rate >= required);
+  return selected ?? maxHackRFSampleRate;
 };
 
 const normalizeTuning = () => {
@@ -306,9 +362,7 @@ const normalizeTuning = () => {
   if (spanHz.value < minDisplayBandwidthHz) spanHz.value = minDisplayBandwidthHz;
   if (spanHz.value > maxSpanHz) spanHz.value = maxSpanHz;
 
-  const requiredBandwidth =
-    spanHz.value + 2 * Math.abs(viewCenterFreq.value - rfCenterFreq.value);
-  rxSampleRate.value = chooseSampleRate(requiredBandwidth);
+  rxSampleRate.value = chooseSampleRate(spanHz.value);
 };
 
 const restartRx = async () => {
@@ -467,6 +521,14 @@ const initAudio = async () => {
       numberOfOutputs: 1,
       outputChannelCount: [1],
     });
+    audioNode.port.onmessage = (event: MessageEvent) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object' || msg.type !== 'stats') return;
+      audioPerf.bufferedMs = typeof msg.bufferedMs === 'number' ? msg.bufferedMs : 0;
+      audioPerf.queueLength = typeof msg.queueLength === 'number' ? msg.queueLength : 0;
+      audioPerf.underrunCount = typeof msg.underrunCount === 'number' ? msg.underrunCount : 0;
+      audioPerf.droppedSamples = typeof msg.droppedSamples === 'number' ? msg.droppedSamples : 0;
+    };
     audioNode.connect(audioCtx.destination);
   }
 
@@ -496,6 +558,10 @@ const stopRenderLoop = () => {
   }
   renderLastTimeMs = 0;
   latestFftFrame = null;
+  drawWindowStartMs = 0;
+  drawFrameCount = 0;
+  drawMsSum = 0;
+  drawMsMax = 0;
 };
 
 const drawFftAndWaterfall = (
@@ -503,6 +569,7 @@ const drawFftAndWaterfall = (
   canvasFft: HTMLCanvasElement,
   fftOut: Float32Array
 ) => {
+  const drawStart = performance.now();
   if (waterfall) {
     waterfall.renderLine(fftOut);
   }
@@ -535,6 +602,7 @@ const drawFftAndWaterfall = (
   canvasFftCtx.stroke();
 
   canvasFftCtx.restore();
+  return performance.now() - drawStart;
 };
 
 const startRenderLoop = (
@@ -549,7 +617,22 @@ const startRenderLoop = (
     renderLastTimeMs = timeMs;
 
     if (!latestFftFrame) return;
-    drawFftAndWaterfall(canvasFftCtx, canvasFft, latestFftFrame);
+    const drawMs = drawFftAndWaterfall(canvasFftCtx, canvasFft, latestFftFrame);
+    if (drawWindowStartMs === 0) drawWindowStartMs = timeMs;
+    drawFrameCount += 1;
+    drawMsSum += drawMs;
+    if (drawMs > drawMsMax) drawMsMax = drawMs;
+    const elapsedMs = timeMs - drawWindowStartMs;
+    if (elapsedMs >= 1000) {
+      const elapsedSec = elapsedMs / 1000;
+      drawPerf.fps = drawFrameCount / elapsedSec;
+      drawPerf.drawMsAvg = drawMsSum / drawFrameCount;
+      drawPerf.drawMsMax = drawMsMax;
+      drawWindowStartMs = timeMs;
+      drawFrameCount = 0;
+      drawMsSum = 0;
+      drawMsMax = 0;
+    }
   };
   renderLoopId = requestAnimationFrame(tick);
 };
@@ -596,10 +679,18 @@ const start = async () => {
   startRenderLoop(canvasFftCtx, canvasFft);
 
   // Comlinkのコールバック関数は proxy に包む必要がある
-  const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array) => {
+  const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array, perf?: DspPerfStats) => {
     playAudioBuffer(audioOut);
     // Wasm側バッファ再利用の影響を避けるためコピーして保持する
     latestFftFrame = new Float32Array(fftOut);
+    if (perf) {
+      dspPerf.blocksPerSec = perf.blocksPerSec;
+      dspPerf.iqBytesPerSec = perf.iqBytesPerSec;
+      dspPerf.dspProcessMsAvg = perf.dspProcessMsAvg;
+      dspPerf.dspProcessMsMax = perf.dspProcessMsMax;
+      dspPerf.callbackMsAvg = perf.callbackMsAvg;
+      dspPerf.callbackMsMax = perf.callbackMsMax;
+    }
   });
 
   await backend.startRx({
@@ -850,6 +941,15 @@ body, #app {
 .body-2 {
 	font-size: 12px;
 	color: #aaa;
+}
+
+.perf-panel {
+	margin-top: 12px;
+	padding: 8px;
+	border: 1px solid #333;
+	border-radius: 4px;
+	background: #0d0d0d;
+	line-height: 1.45;
 }
 
 /* Snackbar */

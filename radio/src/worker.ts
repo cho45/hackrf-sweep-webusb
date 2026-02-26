@@ -2,6 +2,20 @@ import { expose } from "comlink";
 import init, { Receiver } from "../hackrf-dsp/pkg/hackrf_dsp";
 import { HackRF } from "./hackrf";
 
+type PerfStats = {
+	windowMs: number;
+	blocks: number;
+	blocksPerSec: number;
+	iqBytesPerSec: number;
+	blockIntervalMsAvg: number;
+	blockIntervalMsMax: number;
+	dspProcessMsAvg: number;
+	dspProcessMsMax: number;
+	callbackMsAvg: number;
+	callbackMsMax: number;
+	audioSamplesPerSec: number;
+};
+
 export class RadioBackend {
 	device?: HackRF;
 	receiver?: Receiver;
@@ -95,7 +109,7 @@ export class RadioBackend {
 			lnaGain: number;
 			vgaGain: number;
 		},
-		onData: (audioOut: Float32Array, fftOut: Float32Array) => void
+		onData: (audioOut: Float32Array, fftOut: Float32Array, perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 		this.ampEnabled = options.ampEnabled;
@@ -129,18 +143,85 @@ export class RadioBackend {
 		await this.device.setSampleRateManual(options.sampleRate, 1);
 		await this.device.setFreq(options.centerFreq);
 
+		let perfWindowStart = performance.now();
+		let lastBlockAt = performance.now();
+		let blockCount = 0;
+		let iqBytes = 0;
+		let blockIntervalMsSum = 0;
+		let blockIntervalMsMax = 0;
+		let processMsSum = 0;
+		let processMsMax = 0;
+		let callbackMsSum = 0;
+		let callbackMsMax = 0;
+		let audioSamplesOut = 0;
+
+		const snapshotPerf = (now: number): PerfStats | undefined => {
+			const windowMs = now - perfWindowStart;
+			if (windowMs < 1000 || blockCount === 0) return undefined;
+
+			const windowSec = windowMs / 1000;
+			const stats: PerfStats = {
+				windowMs,
+				blocks: blockCount,
+				blocksPerSec: blockCount / windowSec,
+				iqBytesPerSec: iqBytes / windowSec,
+				blockIntervalMsAvg: blockIntervalMsSum / blockCount,
+				blockIntervalMsMax,
+				dspProcessMsAvg: processMsSum / blockCount,
+				dspProcessMsMax: processMsMax,
+				callbackMsAvg: callbackMsSum / blockCount,
+				callbackMsMax: callbackMsMax,
+				audioSamplesPerSec: audioSamplesOut / windowSec,
+			};
+
+			perfWindowStart = now;
+			blockCount = 0;
+			iqBytes = 0;
+			blockIntervalMsSum = 0;
+			blockIntervalMsMax = 0;
+			processMsSum = 0;
+			processMsMax = 0;
+			callbackMsSum = 0;
+			callbackMsMax = 0;
+			audioSamplesOut = 0;
+			return stats;
+		};
+
 		await this.device.startRx((data: Uint8Array) => {
 			if (!this.receiver) return;
+			const now = performance.now();
+			const blockIntervalMs = now - lastBlockAt;
+			lastBlockAt = now;
+			blockCount += 1;
+			iqBytes += data.byteLength;
+			blockIntervalMsSum += blockIntervalMs;
+			if (blockIntervalMs > blockIntervalMsMax) {
+				blockIntervalMsMax = blockIntervalMs;
+			}
 
 			// Uint8Array は uint8 (0~255) だが HackRF の IQ データは i8 (-128~127) のため Int8Array にキャスト
 			const iqData = new Int8Array(data.buffer, data.byteOffset, data.byteLength);
 
 			// WASM に IQ データ配列を渡し、復調処理とFFTを実行
+			const processStart = performance.now();
 			const out = this.receiver.process(iqData);
+			const processMs = performance.now() - processStart;
+			processMsSum += processMs;
+			if (processMs > processMsMax) {
+				processMsMax = processMs;
+			}
 			if (out && out.length === 2) {
 				const audioOut = (out[0] as unknown) as Float32Array;
 				const fftOut = (out[1] as unknown) as Float32Array;
-				onData(audioOut, fftOut);
+				audioSamplesOut += audioOut.length;
+				const callbackStart = performance.now();
+				const perf = snapshotPerf(callbackStart);
+				onData(audioOut, fftOut, perf);
+				const callbackMs = performance.now() - callbackStart;
+				callbackMsSum += callbackMs;
+				if (callbackMs > callbackMsMax) {
+					callbackMsMax = callbackMs;
+				}
 			}
 		});
 	}
