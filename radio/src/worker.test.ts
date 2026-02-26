@@ -16,6 +16,9 @@ vi.mock('../hackrf-dsp/pkg/hackrf_dsp', () => {
 		constructor(...args: any[]) {
 			hoisted.receiverCtor(...args);
 		}
+		process_into(_iqData: Int8Array, _audioOut: Float32Array, _fftOut: Float32Array) {
+			return 0;
+		}
 		process() {
 			return [];
 		}

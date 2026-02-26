@@ -64,7 +64,6 @@ pub struct DecimationFilter {
 
 impl DecimationFilter {
     /// より高精度のカットオフが必要な場合は窓関数付きFIRなどを実装する
-    #[allow(dead_code)]
     pub fn new_boxcar(factor: usize) -> Self {
         // 単純移動平均の係数は全て 1/M
         let coeffs = vec![1.0 / (factor as f32); factor];
@@ -77,7 +76,7 @@ impl DecimationFilter {
     }
 
     /// より良い遮断特性を持つFIRフィルタを用いたデシメーター
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new_fir(factor: usize, num_taps: usize, cutoff_norm: f32) -> Self {
         Self::new_fir_band(factor, num_taps, 0.0, cutoff_norm)
     }
@@ -164,7 +163,7 @@ impl DecimationFilter {
 
     /// ブロック単位でのフィルタリングとデシメーション
     /// 入力された配列から 1/M に長さを縮小した出力配列を返す
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<Complex<f32>> {
         let mut output = Vec::with_capacity(input.len() / self.factor + 1);
         self.process_into(input, &mut output);

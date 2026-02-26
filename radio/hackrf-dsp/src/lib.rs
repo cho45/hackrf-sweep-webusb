@@ -306,8 +306,28 @@ impl Receiver {
         self.fft_use_processed = enabled;
     }
 
-    /// 1ブロックのIQデータ(i8型)を受け取り、オーディオ信号とFFT結果を返す。
-    pub fn process(&mut self, iq_data: &[i8]) -> js_sys::Array {
+    /// 1ブロックのIQデータ(i8型)を受け取り、指定バッファへ結果を書き込む。
+    /// 返り値は `audio_out` に有効に書き込まれたサンプル数。
+    pub fn process_into(&mut self, iq_data: &[i8], audio_out: &mut [f32], fft_out: &mut [f32]) -> usize {
+        self.process_internal(iq_data);
+
+        let audio_len = self.audio_buffer.len().min(audio_out.len());
+        if audio_len > 0 {
+            audio_out[..audio_len].copy_from_slice(&self.audio_buffer[..audio_len]);
+        }
+
+        let fft_len = self.fft_visible_buffer.len().min(fft_out.len());
+        if fft_len > 0 {
+            fft_out[..fft_len].copy_from_slice(&self.fft_visible_buffer[..fft_len]);
+        }
+
+        audio_len
+    }
+
+}
+
+impl Receiver {
+    fn process_internal(&mut self, iq_data: &[i8]) {
         let num_samples = iq_data.len() / 2;
         let fft_n = self.fft.get_n();
 
@@ -400,14 +420,6 @@ impl Receiver {
         let visible_end = self.fft_visible_start + self.fft_visible_len;
         self.fft_visible_buffer
             .copy_from_slice(&self.fft_buffer[self.fft_visible_start..visible_end]);
-
-        let out_array = js_sys::Array::new();
-        out_array.push(&js_sys::Float32Array::from(self.audio_buffer.as_slice()));
-        out_array.push(&js_sys::Float32Array::from(
-            self.fft_visible_buffer.as_slice(),
-        ));
-
-        out_array
     }
 }
 

@@ -143,6 +143,20 @@ export class RadioBackend {
 		await this.device.setSampleRateManual(options.sampleRate, 1);
 		await this.device.setFreq(options.centerFreq);
 
+		const mode = options.demodMode.toUpperCase();
+		const demodRate = mode === "FM" ? 200_000 : 50_000;
+		const coarseFactor = Math.max(1, Math.round(options.sampleRate / 1_000_000));
+		const coarseRate = options.sampleRate / coarseFactor;
+		const demodFactor = Math.max(1, Math.round(coarseRate / demodRate));
+		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
+		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
+		const audioScratchCapacity = Math.max(
+			1024,
+			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2)
+		);
+		const audioScratch = new Float32Array(audioScratchCapacity);
+		const fftScratch = new Float32Array(options.fftVisibleBins);
+
 		let perfWindowStart = performance.now();
 		let lastBlockAt = performance.now();
 		let blockCount = 0;
@@ -204,19 +218,18 @@ export class RadioBackend {
 
 			// WASM に IQ データ配列を渡し、復調処理とFFTを実行
 			const processStart = performance.now();
-			const out = this.receiver.process(iqData);
+			const audioLen = this.receiver.process_into(iqData, audioScratch, fftScratch);
 			const processMs = performance.now() - processStart;
 			processMsSum += processMs;
 			if (processMs > processMsMax) {
 				processMsMax = processMs;
 			}
-			if (out && out.length === 2) {
-				const audioOut = (out[0] as unknown) as Float32Array;
-				const fftOut = (out[1] as unknown) as Float32Array;
-				audioSamplesOut += audioOut.length;
+			if (audioLen >= 0) {
+				const audioOut = audioScratch.subarray(0, audioLen);
+				audioSamplesOut += audioLen;
 				const callbackStart = performance.now();
 				const perf = snapshotPerf(callbackStart);
-				onData(audioOut, fftOut, perf);
+				onData(audioOut, fftScratch, perf);
 				const callbackMs = performance.now() - callbackStart;
 				callbackMsSum += callbackMs;
 				if (callbackMs > callbackMsMax) {
