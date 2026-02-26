@@ -296,4 +296,87 @@ mod tests {
             power
         );
     }
+
+    #[test]
+    fn test_long_run_output_count_tracks_ratio_50k_to_48k() {
+        let source_rate = 50_000u32;
+        let target_rate = 48_000u32;
+        let mut resampler = Resampler::new(source_rate, target_rate);
+
+        let total_input = 500_000usize; // 10秒相当
+        let input: Vec<f32> = (0..total_input)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                (2.0 * PI * 1_200.0 * t).sin() + 0.2 * (2.0 * PI * 7_500.0 * t).sin()
+            })
+            .collect();
+
+        let chunk_pattern = [127usize, 509, 1021, 4093];
+        let mut pos = 0usize;
+        let mut chunk_idx = 0usize;
+        let mut output = Vec::new();
+        while pos < input.len() {
+            let chunk_len = chunk_pattern[chunk_idx % chunk_pattern.len()];
+            let end = (pos + chunk_len).min(input.len());
+            resampler.process(&input[pos..end], &mut output);
+            pos = end;
+            chunk_idx += 1;
+        }
+
+        let expected = ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
+        let actual = output.len() as isize;
+        let err = (actual - expected).abs();
+
+        // 有限長処理のため端の遅延分は残るが、誤差はフィルタ長オーダーに収まるべき。
+        let tolerance = resampler.taps_per_phase as isize + 4;
+        assert!(
+            err <= tolerance,
+            "Long-run count drift too large: actual={} expected={} err={} tol={}",
+            actual,
+            expected,
+            err,
+            tolerance
+        );
+    }
+
+    #[test]
+    fn test_long_run_output_count_tracks_ratio_200k_to_48k() {
+        let source_rate = 200_000u32;
+        let target_rate = 48_000u32;
+        let mut resampler = Resampler::new(source_rate, target_rate);
+
+        let total_input = 2_000_000usize; // 10秒相当
+        let input: Vec<f32> = (0..total_input)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                (2.0 * PI * 900.0 * t).sin() + 0.2 * (2.0 * PI * 18_000.0 * t).sin()
+            })
+            .collect();
+
+        let chunk_pattern = [113usize, 701, 4096, 8191];
+        let mut pos = 0usize;
+        let mut chunk_idx = 0usize;
+        let mut output = Vec::new();
+        while pos < input.len() {
+            let chunk_len = chunk_pattern[chunk_idx % chunk_pattern.len()];
+            let end = (pos + chunk_len).min(input.len());
+            resampler.process(&input[pos..end], &mut output);
+            pos = end;
+            chunk_idx += 1;
+        }
+
+        let expected = ((total_input as f64) * (target_rate as f64) / (source_rate as f64)).round() as isize;
+        let actual = output.len() as isize;
+        let err = (actual - expected).abs();
+
+        let tolerance = resampler.taps_per_phase as isize + 4;
+        assert!(
+            err <= tolerance,
+            "Long-run count drift too large: actual={} expected={} err={} tol={}",
+            actual,
+            expected,
+            err,
+            tolerance
+        );
+    }
 }

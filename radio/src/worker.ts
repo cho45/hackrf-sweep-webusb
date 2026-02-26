@@ -12,11 +12,14 @@ type PerfStats = {
 	droppedIqBlocksPerSec: number;
 	blockIntervalMsAvg: number;
 	blockIntervalMsMax: number;
+	blockIntervalMsPeak: number;
 	dspProcessMsAvg: number;
 	dspProcessMsMax: number;
 	callbackMsAvg: number;
 	callbackMsMax: number;
 	audioSamplesPerSec: number;
+	audioSamplesPerSecEma: number;
+	audioSamplesPerSecLong: number;
 };
 
 type WasmInitFn = () => Promise<any>;
@@ -305,24 +308,40 @@ export class RadioBackend {
 
 			const fftScratch = new Float32Array(fftCapacity);
 
-		let perfWindowStart = performance.now();
-		let lastBlockAt = performance.now();
+		let perfStarted = false;
+		let perfWindowStart = 0;
+		let perfTotalStart = 0;
+		let lastBlockAt = 0;
 		let blockCount = 0;
 		let iqBytes = 0;
 		let droppedIqBlocks = 0;
 		let blockIntervalMsSum = 0;
+		let blockIntervalCount = 0;
 		let blockIntervalMsMax = 0;
+		let blockIntervalMsPeak = 0;
 		let processMsSum = 0;
 		let processMsMax = 0;
 		let callbackMsSum = 0;
 		let callbackMsMax = 0;
 		let audioSamplesOut = 0;
+		let audioSamplesOutTotal = 0;
+		let audioSamplesPerSecEma = 0;
+		const audioRateEmaAlpha = 0.2;
 
 		const snapshotPerf = (now: number): PerfStats | undefined => {
+			if (!perfStarted) return undefined;
 			const windowMs = now - perfWindowStart;
 			if (windowMs < 1000 || blockCount === 0) return undefined;
 
 			const windowSec = windowMs / 1000;
+			const audioSamplesPerSec = audioSamplesOut / windowSec;
+			if (audioSamplesPerSecEma === 0) {
+				audioSamplesPerSecEma = audioSamplesPerSec;
+			} else {
+				audioSamplesPerSecEma =
+					audioSamplesPerSecEma * (1 - audioRateEmaAlpha) + audioSamplesPerSec * audioRateEmaAlpha;
+			}
+			const totalSec = Math.max(0.000001, (now - perfTotalStart) / 1000);
 			const stats: PerfStats = {
 				windowMs,
 				blocks: blockCount,
@@ -330,13 +349,16 @@ export class RadioBackend {
 				iqBytesPerSec: iqBytes / windowSec,
 				droppedIqBlocks,
 				droppedIqBlocksPerSec: droppedIqBlocks / windowSec,
-				blockIntervalMsAvg: blockIntervalMsSum / blockCount,
+				blockIntervalMsAvg: blockIntervalCount > 0 ? blockIntervalMsSum / blockIntervalCount : 0,
 				blockIntervalMsMax,
+				blockIntervalMsPeak,
 				dspProcessMsAvg: processMsSum / blockCount,
 				dspProcessMsMax: processMsMax,
 				callbackMsAvg: callbackMsSum / blockCount,
 				callbackMsMax: callbackMsMax,
-				audioSamplesPerSec: audioSamplesOut / windowSec,
+				audioSamplesPerSec,
+				audioSamplesPerSecEma,
+				audioSamplesPerSecLong: audioSamplesOutTotal / totalSec,
 			};
 
 			perfWindowStart = now;
@@ -344,6 +366,7 @@ export class RadioBackend {
 			iqBytes = 0;
 			droppedIqBlocks = 0;
 			blockIntervalMsSum = 0;
+			blockIntervalCount = 0;
 			blockIntervalMsMax = 0;
 			processMsSum = 0;
 			processMsMax = 0;
@@ -356,14 +379,26 @@ export class RadioBackend {
 		await this.device.startRx((data: Uint8Array) => {
 			if (!this.receiver) return;
 			const now = performance.now();
-			const blockIntervalMs = now - lastBlockAt;
+			if (!perfStarted) {
+				perfStarted = true;
+				perfWindowStart = now;
+				perfTotalStart = now;
+				lastBlockAt = now;
+			}
+			if (blockCount > 0) {
+				const blockIntervalMs = now - lastBlockAt;
+				blockIntervalMsSum += blockIntervalMs;
+				blockIntervalCount += 1;
+				if (blockIntervalMs > blockIntervalMsMax) {
+					blockIntervalMsMax = blockIntervalMs;
+				}
+				if (blockIntervalMs > blockIntervalMsPeak) {
+					blockIntervalMsPeak = blockIntervalMs;
+				}
+			}
 			lastBlockAt = now;
 			blockCount += 1;
 			iqBytes += data.byteLength;
-			blockIntervalMsSum += blockIntervalMs;
-			if (blockIntervalMs > blockIntervalMsMax) {
-				blockIntervalMsMax = blockIntervalMs;
-			}
 
 			if (data.byteLength > iqCapacity) {
 				droppedIqBlocks += 1;
@@ -399,6 +434,7 @@ export class RadioBackend {
 					}
 					fftScratch.set(fftReadView);
 					audioSamplesOut += audioLen;
+					audioSamplesOutTotal += audioLen;
 					const callbackStart = performance.now();
 					const perf = snapshotPerf(callbackStart);
 					onData(fftScratch, perf);

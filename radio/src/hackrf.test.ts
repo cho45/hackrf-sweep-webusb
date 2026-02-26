@@ -66,12 +66,13 @@ describe('HackRF Rx lifecycle', () => {
 		});
 
 		await Promise.resolve();
-		expect(pending.length).toBe(2);
+		expect(pending.length).toBe(HackRF.RX_TRANSFER_IN_FLIGHT);
 
 		// DataView has non-zero offset: expected payload is [1, 2, 3, 4]
 		const packet = makeTransfer([9, 8, 1, 2, 3, 4], 2, 4);
-		pending.shift()!(packet);
-		pending.shift()!(packet);
+		while (pending.length > 0) {
+			pending.shift()!(packet);
+		}
 
 		await stopPromise;
 		expect(received).not.toBeNull();
@@ -88,11 +89,12 @@ describe('HackRF Rx lifecycle', () => {
 		});
 
 		await Promise.resolve();
-		expect(pending.length).toBe(2);
+		expect(pending.length).toBe(HackRF.RX_TRANSFER_IN_FLIGHT);
 
 		const packet = makeTransfer([1, 2, 3, 4]);
-		pending.shift()!(packet);
-		pending.shift()!(packet);
+		while (pending.length > 0) {
+			pending.shift()!(packet);
+		}
 
 		await expect(hackrf.stopRx()).resolves.toBeUndefined();
 	});

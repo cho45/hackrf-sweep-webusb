@@ -27,6 +27,12 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     this.droppedSamples = 0;
     this.underrunCount = 0;
     this.lastStatsAt = currentTime;
+    this.pushCountSinceStats = 0;
+    this.pushIntervalSumSec = 0;
+    this.pushIntervalCount = 0;
+    this.pushIntervalMaxSec = 0;
+    this.pushIntervalPeakSec = 0;
+    this.lastPushAtSec = -1;
 
     this.handleMessage = (msg) => {
       if (!msg || typeof msg !== 'object') return;
@@ -34,6 +40,21 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
       if (msg.type === 'push') {
         const data = msg.data;
         if (!(data instanceof Float32Array) || data.length === 0) return;
+
+        const nowSec = currentTime;
+        if (this.lastPushAtSec >= 0) {
+          const gapSec = Math.max(0, nowSec - this.lastPushAtSec);
+          this.pushIntervalSumSec += gapSec;
+          this.pushIntervalCount += 1;
+          if (gapSec > this.pushIntervalMaxSec) {
+            this.pushIntervalMaxSec = gapSec;
+          }
+          if (gapSec > this.pushIntervalPeakSec) {
+            this.pushIntervalPeakSec = gapSec;
+          }
+        }
+        this.lastPushAtSec = nowSec;
+        this.pushCountSinceStats += 1;
 
         this.queue.push({ data, readPos: 0 });
         this.bufferedSamples += data.length;
@@ -56,6 +77,12 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         this.recomputeBufferTargets();
         this.lastBufferGrowAt = -1;
         this.lastStatsAt = currentTime;
+        this.pushCountSinceStats = 0;
+        this.pushIntervalSumSec = 0;
+        this.pushIntervalCount = 0;
+        this.pushIntervalMaxSec = 0;
+        this.pushIntervalPeakSec = 0;
+        this.lastPushAtSec = -1;
       }
     };
 
@@ -194,6 +221,16 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     }
 
     if (currentTime - this.lastStatsAt >= 0.5) {
+      const statsWindowSec = Math.max(0.000001, currentTime - this.lastStatsAt);
+      const pushIntervalMsAvg = this.pushIntervalCount > 0
+        ? (this.pushIntervalSumSec / this.pushIntervalCount) * 1000
+        : 0;
+      const pushIntervalMsMax = this.pushIntervalMaxSec * 1000;
+      const pushIntervalMsPeak = this.pushIntervalPeakSec * 1000;
+      const pushesPerSec = this.pushCountSinceStats / statsWindowSec;
+      const inputStaleMs = this.lastPushAtSec >= 0
+        ? Math.max(0, (currentTime - this.lastPushAtSec) * 1000)
+        : 0;
       this.lastStatsAt = currentTime;
       this.port.postMessage({
         type: 'stats',
@@ -205,7 +242,16 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         droppedSamples: this.droppedSamples,
         underrunCount: this.underrunCount,
         hardUnderrunCount: this.hardUnderrunCount,
+        pushesPerSec,
+        pushIntervalMsAvg,
+        pushIntervalMsMax,
+        pushIntervalMsPeak,
+        inputStaleMs,
       });
+      this.pushCountSinceStats = 0;
+      this.pushIntervalSumSec = 0;
+      this.pushIntervalCount = 0;
+      this.pushIntervalMaxSec = 0;
     }
 
     return true;

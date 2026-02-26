@@ -53,6 +53,14 @@ class HackRF {
 
 	static USB_CONFIG_STANDARD = 0x1;
 	static TRANSFER_BUFFER_SIZE = 262144;
+	// 受信in-flight数は「時間ヘッドルーム」で決める。
+	// headroom_ms = TRANSFER_BUFFER_SIZE * in_flight / (2 * rx_sample_rate) * 1000
+	// （2 は IQ が 2byte/sample のため）
+	//
+	// 20Msps + TRANSFER_BUFFER_SIZE=262144 のとき、1転送は約6.55ms相当。
+	// まれに100ms級のジッターが観測されるため、in_flight=20 で
+	// 約131msのヘッドルームを確保して欠落を避ける。
+	static RX_TRANSFER_IN_FLIGHT = 20;
 
 	static SAMPLES_PER_BLOCK = 8192;
 	static BYTES_PER_BLOCK = 16384;
@@ -472,7 +480,10 @@ class HackRF {
 			}
 			console.log('rx transfer ended (rx)');
 		};
-		this.rxRunning = [transfer(), transfer()];
+		this.rxRunning = Array.from(
+			{ length: HackRF.RX_TRANSFER_IN_FLIGHT },
+			() => transfer()
+		);
 	}
 
 	async startRxSweep(callback: (data: Uint8Array) => void) {
@@ -502,7 +513,10 @@ class HackRF {
 			}
 			console.log('rx transfer ended (rx sweep)');
 		};
-		this.rxRunning = [transfer(), transfer()];
+		this.rxRunning = Array.from(
+			{ length: HackRF.RX_TRANSFER_IN_FLIGHT },
+			() => transfer()
+		);
 	}
 
 	async boardRevRead() {
