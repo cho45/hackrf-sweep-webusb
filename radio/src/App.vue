@@ -98,6 +98,7 @@
 
         <div style="margin-top: 8px;"><b>Audio</b></div>
         <div>buffer: {{ fmtNum(audioPerf.bufferedMs, 1) }} ms</div>
+        <div>scale: {{ fmtNum(audioPerf.bufferScale, 2) }} / start: {{ fmtNum(audioPerf.minStartMs, 1) }} ms / low: {{ fmtNum(audioPerf.lowWaterMs, 1) }} ms</div>
         <div>queue: {{ fmtInt(audioPerf.queueLength) }} / underrun: {{ fmtInt(audioPerf.underrunCount) }} / hard: {{ fmtInt(audioPerf.hardUnderrunCount) }}</div>
         <div>dropped: {{ fmtInt(audioPerf.droppedSamples) }} samples</div>
       </div>
@@ -322,6 +323,9 @@ const drawPerf = reactive({
 });
 const audioPerf = reactive({
   bufferedMs: 0,
+  minStartMs: 0,
+  lowWaterMs: 0,
+  bufferScale: 1,
   queueLength: 0,
   underrunCount: 0,
   hardUnderrunCount: 0,
@@ -523,6 +527,9 @@ const initAudio = async () => {
       const msg = event.data;
       if (!msg || typeof msg !== 'object' || msg.type !== 'stats') return;
       audioPerf.bufferedMs = typeof msg.bufferedMs === 'number' ? msg.bufferedMs : 0;
+      audioPerf.minStartMs = typeof msg.minStartMs === 'number' ? msg.minStartMs : 0;
+      audioPerf.lowWaterMs = typeof msg.lowWaterMs === 'number' ? msg.lowWaterMs : 0;
+      audioPerf.bufferScale = typeof msg.bufferScale === 'number' ? msg.bufferScale : 1;
       audioPerf.queueLength = typeof msg.queueLength === 'number' ? msg.queueLength : 0;
       audioPerf.underrunCount = typeof msg.underrunCount === 'number' ? msg.underrunCount : 0;
       audioPerf.hardUnderrunCount = typeof msg.hardUnderrunCount === 'number' ? msg.hardUnderrunCount : 0;
