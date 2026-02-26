@@ -20,6 +20,7 @@ const PLL_DAMPING: f32 = 0.707;
 const PLL_MAX_FREQ_ERR_HZ: f32 = 400.0;
 const PLL_LOCK_ERR_RAD: f32 = 0.35;
 const PLL_LOCK_Q_OVER_I_MAX: f32 = 0.35;
+const LR_PHASE_TRACK_LPF_HZ: f32 = 25.0;
 
 /// FM MPX から L/R を復元する簡易ステレオデコーダ。
 ///
@@ -65,6 +66,9 @@ pub struct FMStereoDecoder {
     sum_lpf: FirFilter,
     diff_i_lpf: FirFilter,
     diff_q_lpf: FirFilter,
+    lr2_re_lp: f32,
+    lr2_im_lp: f32,
+    lr_phase_track_alpha: f32,
 
     deemphasis_alpha: Option<f32>,
     deemphasis_l: f32,
@@ -133,6 +137,7 @@ impl FMStereoDecoder {
         let pilot_quality_alpha = alpha_from_tau(sample_rate_hz, 0.05);
         let blend_attack_alpha = alpha_from_tau(sample_rate_hz, 0.03);
         let blend_release_alpha = alpha_from_tau(sample_rate_hz, 0.20);
+        let lr_phase_track_alpha = alpha_from_cutoff(sample_rate_hz, LR_PHASE_TRACK_LPF_HZ);
         let wn = 2.0 * std::f32::consts::PI * PLL_BW_HZ / sample_rate_hz;
         let pll_kp = 2.0 * PLL_DAMPING * wn;
         let pll_ki = wn * wn;
@@ -179,6 +184,9 @@ impl FMStereoDecoder {
                 AUDIO_FIR_TAPS,
                 AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
             ),
+            lr2_re_lp: 0.0,
+            lr2_im_lp: 0.0,
+            lr_phase_track_alpha,
             deemphasis_alpha,
             deemphasis_l: 0.0,
             deemphasis_r: 0.0,
@@ -223,6 +231,8 @@ impl FMStereoDecoder {
         self.sum_lpf.reset();
         self.diff_i_lpf.reset();
         self.diff_q_lpf.reset();
+        self.lr2_re_lp = 0.0;
+        self.lr2_im_lp = 0.0;
         self.deemphasis_l = 0.0;
         self.deemphasis_r = 0.0;
         self.pilot_level = 0.0;
@@ -332,10 +342,21 @@ impl FMStereoDecoder {
             // - L-R: 同期検波後の低域(0..15kHz)、I/QをそれぞれLPF
             let sum = self.sum_lpf.process_sample(x);
             let diff_i = self.diff_i_lpf.process_sample(lr_i_raw);
-            let _ = self.diff_q_lpf.process_sample(lr_q_raw);
+            let diff_q = self.diff_q_lpf.process_sample(lr_q_raw);
+
+            // L-R複素成分の二乗平均から位相ズレを推定し、実軸へ寄せる。
+            // z = s * exp(jδ) (s: 実信号) のとき、arg(E[z^2]) = 2δ を使う。
+            let lr2_re = diff_i * diff_i - diff_q * diff_q;
+            let lr2_im = 2.0 * diff_i * diff_q;
+            self.lr2_re_lp += self.lr_phase_track_alpha * (lr2_re - self.lr2_re_lp);
+            self.lr2_im_lp += self.lr_phase_track_alpha * (lr2_im - self.lr2_im_lp);
+            let lr_phase_corr = 0.5 * self.lr2_im_lp.atan2(self.lr2_re_lp);
+            let c_lr = lr_phase_corr.cos();
+            let s_lr = lr_phase_corr.sin();
+            let lr_aligned = diff_i * c_lr + diff_q * s_lr;
 
             // lock 品質に応じて blend を掛け、誤ロック時は差分成分を自動で弱める。
-            let lr = diff_i * self.stereo_blend;
+            let lr = lr_aligned * self.stereo_blend;
             let mut l = sum + lr;
             let mut r = sum - lr;
 
