@@ -4,10 +4,16 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     this.queue = [];
     this.bufferedSamples = 0;
     this.started = false;
+    this.lastSample = 0.0;
+    this.hardUnderrunCount = 0;
+    this.consecutiveEmptyBlocks = 0;
+    this.inHardUnderrun = false;
+    // 128sample/block 前提で約350ms。短いフォーカス移動で hard underrun にしない。
+    this.maxSoftUnderrunBlocks = Math.max(12, Math.floor((sampleRate * 0.35) / 128));
 
     // ジッタ吸収用に少しバッファをためてから再生を開始する。
     this.minStartSamples = Math.floor(sampleRate * 0.08);
-    this.maxBufferedSamples = Math.floor(sampleRate * 1.5);
+    this.maxBufferedSamples = Math.floor(sampleRate * 1.8);
     this.targetBufferedSamples = Math.floor(sampleRate * 0.4);
     this.droppedSamples = 0;
     this.underrunCount = 0;
@@ -32,8 +38,12 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         this.queue = [];
         this.bufferedSamples = 0;
         this.started = false;
+        this.lastSample = 0.0;
         this.droppedSamples = 0;
         this.underrunCount = 0;
+        this.hardUnderrunCount = 0;
+        this.consecutiveEmptyBlocks = 0;
+        this.inHardUnderrun = false;
         this.lastStatsAt = currentTime;
       }
     };
@@ -89,10 +99,29 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
       }
     }
 
-    // 供給不足時は再バッファリングへ戻る。
+    if (written > 0) {
+      this.lastSample = out[written - 1];
+      this.consecutiveEmptyBlocks = 0;
+      this.inHardUnderrun = false;
+    }
+
+    // 供給不足時はサンプルホールドで短期ジッタを吸収する。
     if (written < out.length) {
-      this.started = false;
       this.underrunCount += 1;
+      if (written === 0) {
+        this.consecutiveEmptyBlocks += 1;
+        out.fill(this.inHardUnderrun ? 0.0 : this.lastSample, written);
+        // 完全枯渇が一定時間以上続いた場合は hard underrun として記録。
+        // 再バッファリング状態へ戻さず、復帰時は即座に再生を再開する。
+        if (this.consecutiveEmptyBlocks > this.maxSoftUnderrunBlocks) {
+          if (!this.inHardUnderrun) {
+            this.hardUnderrunCount += 1;
+            this.inHardUnderrun = true;
+          }
+        }
+      } else {
+        out.fill(this.lastSample, written);
+      }
     }
 
     if (currentTime - this.lastStatsAt >= 0.5) {
@@ -103,6 +132,7 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         queueLength: this.queue.length,
         droppedSamples: this.droppedSamples,
         underrunCount: this.underrunCount,
+        hardUnderrunCount: this.hardUnderrunCount,
       });
     }
 

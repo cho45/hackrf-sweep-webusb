@@ -101,7 +101,7 @@
 
         <div style="margin-top: 8px;"><b>Audio</b></div>
         <div>buffer: {{ fmtNum(audioPerf.bufferedMs, 1) }} ms</div>
-        <div>queue: {{ fmtInt(audioPerf.queueLength) }} / underrun: {{ fmtInt(audioPerf.underrunCount) }}</div>
+        <div>queue: {{ fmtInt(audioPerf.queueLength) }} / underrun: {{ fmtInt(audioPerf.underrunCount) }} / hard: {{ fmtInt(audioPerf.hardUnderrunCount) }}</div>
         <div>dropped: {{ fmtInt(audioPerf.droppedSamples) }} samples</div>
       </div>
 
@@ -331,6 +331,7 @@ const audioPerf = reactive({
   bufferedMs: 0,
   queueLength: 0,
   underrunCount: 0,
+  hardUnderrunCount: 0,
   droppedSamples: 0,
 });
 
@@ -532,6 +533,7 @@ const initAudio = async () => {
       audioPerf.bufferedMs = typeof msg.bufferedMs === 'number' ? msg.bufferedMs : 0;
       audioPerf.queueLength = typeof msg.queueLength === 'number' ? msg.queueLength : 0;
       audioPerf.underrunCount = typeof msg.underrunCount === 'number' ? msg.underrunCount : 0;
+      audioPerf.hardUnderrunCount = typeof msg.hardUnderrunCount === 'number' ? msg.hardUnderrunCount : 0;
       audioPerf.droppedSamples = typeof msg.droppedSamples === 'number' ? msg.droppedSamples : 0;
     };
     audioNode.connect(audioCtx.destination);
