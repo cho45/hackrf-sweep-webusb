@@ -86,25 +86,20 @@
       </div>
       <div class="perf-panel body-2" v-if="running">
         <div><b>DSP</b></div>
-        <div>blocks/s: {{ fmtNum(dspPerf.blocksPerSec, 1) }}</div>
-        <div>block interval ms(avg/max/peak): {{ fmtNum(dspPerf.blockIntervalMsAvg, 2) }} / {{ fmtNum(dspPerf.blockIntervalMsMax, 2) }} / {{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }}</div>
-        <div>process ms(avg/max): {{ fmtNum(dspPerf.dspProcessMsAvg, 2) }} / {{ fmtNum(dspPerf.dspProcessMsMax, 2) }}</div>
-        <div>cb ms(avg/max): {{ fmtNum(dspPerf.callbackMsAvg, 2) }} / {{ fmtNum(dspPerf.callbackMsMax, 2) }}</div>
-        <div>IQ MB/s: {{ fmtNum(dspPerf.iqBytesPerSec / 1_000_000, 2) }}</div>
-        <div>audio out hz(win/ema/long): {{ fmtNum(dspPerf.audioSamplesPerSec, 0) }} / {{ fmtNum(dspPerf.audioSamplesPerSecEma, 0) }} / {{ fmtNum(dspPerf.audioSamplesPerSecLong, 0) }} (target {{ fmtNum(audioOutputSampleRate, 0) }})</div>
-        <div>dropped IQ blocks: {{ fmtInt(dspPerf.droppedIqBlocks) }} ({{ fmtNum(dspPerf.droppedIqBlocksPerSec, 2) }}/s)</div>
+        <div>block interval peak: {{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }} ms</div>
+        <div>process peak: {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
+        <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
+        <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
 
         <div style="margin-top: 8px;"><b>Draw</b></div>
         <div>fps: {{ fmtNum(drawPerf.fps, 1) }}</div>
-        <div>draw ms(avg/max): {{ fmtNum(drawPerf.drawMsAvg, 2) }} / {{ fmtNum(drawPerf.drawMsMax, 2) }}</div>
+        <div>draw ms(avg/peak): {{ fmtNum(drawPerf.drawMsAvg, 2) }} / {{ fmtNum(drawPerf.drawMsMax, 2) }}</div>
 
         <div style="margin-top: 8px;"><b>Audio</b></div>
         <div>buffer: {{ fmtNum(audioPerf.bufferedMs, 1) }} ms</div>
-        <div>scale: {{ fmtNum(audioPerf.bufferScale, 2) }} / start: {{ fmtNum(audioPerf.minStartMs, 1) }} ms / low: {{ fmtNum(audioPerf.lowWaterMs, 1) }} ms</div>
-        <div>push/s: {{ fmtNum(audioPerf.pushesPerSec, 1) }} / gap ms(avg/max/peak): {{ fmtNum(audioPerf.pushIntervalMsAvg, 2) }} / {{ fmtNum(audioPerf.pushIntervalMsMax, 2) }} / {{ fmtNum(audioPerf.pushIntervalMsPeak, 2) }}</div>
-        <div>input stale: {{ fmtNum(audioPerf.inputStaleMs, 1) }} ms</div>
-        <div>queue: {{ fmtInt(audioPerf.queueLength) }} / underrun: {{ fmtInt(audioPerf.underrunCount) }} / hard: {{ fmtInt(audioPerf.hardUnderrunCount) }}</div>
-        <div>dropped: {{ fmtInt(audioPerf.droppedSamples) }} samples</div>
+        <div>input gap peak: {{ fmtNum(audioPerf.inputGapMsPeak, 2) }} ms</div>
+        <div>underrun: {{ fmtNum(audioPerf.underrunCount, 0) }}</div>
+        <div>dropped audio: {{ fmtNum(audioPerf.droppedSamplesCount, 0) }} samples</div>
       </div>
 
       <div class="snackbar" :class="{ show: snackbar.show }">
@@ -247,22 +242,14 @@ const ncoOffset = computed(() => targetFreq.value - rfCenterFreq.value);
 type KeypadField = 'target' | 'span';
 type DisplayUnit = 'Hz' | 'kHz' | 'MHz';
 type DspPerfStats = {
-  windowMs: number;
-  blocks: number;
-  blocksPerSec: number;
-  iqBytesPerSec: number;
-  droppedIqBlocks: number;
-  droppedIqBlocksPerSec: number;
-  blockIntervalMsAvg: number;
-  blockIntervalMsMax: number;
+  // USB入力欠落が起きていないか
+  droppedIqBlocksCount: number;
+  // USB/スケジューリング由来の停止スパイク
   blockIntervalMsPeak: number;
-  dspProcessMsAvg: number;
-  dspProcessMsMax: number;
-  callbackMsAvg: number;
-  callbackMsMax: number;
-  audioSamplesPerSec: number;
-  audioSamplesPerSecEma: number;
-  audioSamplesPerSecLong: number;
+  // DSP処理詰まりの検知
+  dspProcessMsPeak: number;
+  // 長期供給不足の判定
+  audioOutHzLong: number;
 };
 const keypadField = ref<KeypadField | null>(null);
 const keypadOpenToken = ref(0);
@@ -315,20 +302,14 @@ let drawFrameCount = 0;
 let drawMsSum = 0;
 let drawMsMax = 0;
 const dspPerf = reactive({
-  blocksPerSec: 0,
-  blockIntervalMsAvg: 0,
-  blockIntervalMsMax: 0,
+  // USB/スケジューリング停止スパイク監視
   blockIntervalMsPeak: 0,
-  iqBytesPerSec: 0,
-  droppedIqBlocks: 0,
-  droppedIqBlocksPerSec: 0,
-  dspProcessMsAvg: 0,
-  dspProcessMsMax: 0,
-  callbackMsAvg: 0,
-  callbackMsMax: 0,
-  audioSamplesPerSec: 0,
-  audioSamplesPerSecEma: 0,
-  audioSamplesPerSecLong: 0,
+  // DSP過負荷監視
+  dspProcessMsPeak: 0,
+  // USB入力欠落監視
+  droppedIqBlocksCount: 0,
+  // 長期供給不足監視
+  audioOutHzLong: 0,
 });
 const drawPerf = reactive({
   fps: 0,
@@ -336,19 +317,14 @@ const drawPerf = reactive({
   drawMsMax: 0,
 });
 const audioPerf = reactive({
+  // 再生余裕（枯渇予兆）
   bufferedMs: 0,
-  minStartMs: 0,
-  lowWaterMs: 0,
-  bufferScale: 1,
-  queueLength: 0,
+  // 音切れ直接KPI
   underrunCount: 0,
-  hardUnderrunCount: 0,
-  droppedSamples: 0,
-  pushesPerSec: 0,
-  pushIntervalMsAvg: 0,
-  pushIntervalMsMax: 0,
-  pushIntervalMsPeak: 0,
-  inputStaleMs: 0,
+  // 入力停止スパイク
+  inputGapMsPeak: 0,
+  // バッファ保護のためのサンプル破棄監視
+  droppedSamplesCount: 0,
 });
 
 const showSnackbar = (msg: string) => {
@@ -358,7 +334,6 @@ const showSnackbar = (msg: string) => {
 };
 
 const fmtNum = (v: number, digits = 2) => Number.isFinite(v) ? v.toFixed(digits) : '-';
-const fmtInt = (v: number) => Number.isFinite(v) ? String(Math.round(v)) : '-';
 
 // 桁合わせ用のヘルパー
 const formatFreq = (hz: number) => {
@@ -546,18 +521,9 @@ const initAudio = async () => {
       const msg = event.data;
       if (!msg || typeof msg !== 'object' || msg.type !== 'stats') return;
       audioPerf.bufferedMs = typeof msg.bufferedMs === 'number' ? msg.bufferedMs : 0;
-      audioPerf.minStartMs = typeof msg.minStartMs === 'number' ? msg.minStartMs : 0;
-      audioPerf.lowWaterMs = typeof msg.lowWaterMs === 'number' ? msg.lowWaterMs : 0;
-      audioPerf.bufferScale = typeof msg.bufferScale === 'number' ? msg.bufferScale : 1;
-      audioPerf.queueLength = typeof msg.queueLength === 'number' ? msg.queueLength : 0;
       audioPerf.underrunCount = typeof msg.underrunCount === 'number' ? msg.underrunCount : 0;
-      audioPerf.hardUnderrunCount = typeof msg.hardUnderrunCount === 'number' ? msg.hardUnderrunCount : 0;
-      audioPerf.droppedSamples = typeof msg.droppedSamples === 'number' ? msg.droppedSamples : 0;
-      audioPerf.pushesPerSec = typeof msg.pushesPerSec === 'number' ? msg.pushesPerSec : 0;
-      audioPerf.pushIntervalMsAvg = typeof msg.pushIntervalMsAvg === 'number' ? msg.pushIntervalMsAvg : 0;
-      audioPerf.pushIntervalMsMax = typeof msg.pushIntervalMsMax === 'number' ? msg.pushIntervalMsMax : 0;
-      audioPerf.pushIntervalMsPeak = typeof msg.pushIntervalMsPeak === 'number' ? msg.pushIntervalMsPeak : 0;
-      audioPerf.inputStaleMs = typeof msg.inputStaleMs === 'number' ? msg.inputStaleMs : 0;
+      audioPerf.inputGapMsPeak = typeof msg.inputGapMsPeak === 'number' ? msg.inputGapMsPeak : 0;
+      audioPerf.droppedSamplesCount = typeof msg.droppedSamplesCount === 'number' ? msg.droppedSamplesCount : 0;
     };
     audioNode.connect(audioCtx.destination);
   }
@@ -710,20 +676,10 @@ const start = async () => {
     }
     latestFftFrame.set(fftOut);
     if (perf) {
-      dspPerf.blocksPerSec = perf.blocksPerSec;
-      dspPerf.blockIntervalMsAvg = perf.blockIntervalMsAvg;
-      dspPerf.blockIntervalMsMax = perf.blockIntervalMsMax;
       dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
-      dspPerf.iqBytesPerSec = perf.iqBytesPerSec;
-      dspPerf.droppedIqBlocks = perf.droppedIqBlocks;
-      dspPerf.droppedIqBlocksPerSec = perf.droppedIqBlocksPerSec;
-      dspPerf.dspProcessMsAvg = perf.dspProcessMsAvg;
-      dspPerf.dspProcessMsMax = perf.dspProcessMsMax;
-      dspPerf.callbackMsAvg = perf.callbackMsAvg;
-      dspPerf.callbackMsMax = perf.callbackMsMax;
-      dspPerf.audioSamplesPerSec = perf.audioSamplesPerSec;
-      dspPerf.audioSamplesPerSecEma = perf.audioSamplesPerSecEma;
-      dspPerf.audioSamplesPerSecLong = perf.audioSamplesPerSecLong;
+      dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
+      dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
+      dspPerf.audioOutHzLong = perf.audioOutHzLong;
     }
   });
 
