@@ -57,7 +57,6 @@ impl DemodMode {
 }
 
 /// デシメーション用 FIR タップ数を factor から算出する。
-/// factor が大きいほど急峻なカットオフが必要で、タップ数を増やす。
 fn compute_fir_taps(factor: usize) -> usize {
     let raw = (factor * 15).max(31).min(1001);
     raw | 1 // 奇数保証
@@ -156,15 +155,6 @@ impl Receiver {
 
         // FIR タップ数を factor に基づいて算出
         let fir_taps = compute_fir_taps(decimation_factor);
-
-        // DEBUG: 以前のパラメータに強制して切り分け
-        let (decimation_factor, fir_taps, decimated_sample_rate) = if mode == DemodMode::Am {
-            let f = 40usize;
-            (f, 601, sample_rate / f as f32)
-        } else {
-            (decimation_factor, fir_taps, decimated_sample_rate)
-        };
-
         let min_cutoff_norm = if_min_hz / sample_rate;
         let max_cutoff_norm = if_max_hz / sample_rate;
 
@@ -208,8 +198,7 @@ impl Receiver {
             dc_canceller: DcCanceller::new(sample_rate, FIXED_DC_NOTCH_Q),
             filter: {
                 let f = DecimationFilter::new_fir_band(decimation_factor, fir_taps, min_cutoff_norm, max_cutoff_norm);
-                let dc_gain: f32 = f.coeffs_dc_gain();
-                log(&format!("[Filter] dc_gain={:.6} num_coeffs={}", dc_gain, fir_taps));
+                log(&format!("[Filter] dc_gain={:.6} num_coeffs={}", f.coeffs_dc_gain(), fir_taps));
                 f
             },
             am_demod: AMDemodulator::new(),
@@ -306,20 +295,18 @@ impl Receiver {
         );
         self.resampler.process(&self.demod_buffer, &mut self.audio_buffer);
 
-        // デバッグログ（最初の3ブロックのみ）
+        // デバッグログ（最初の5ブロックのみ）
         {
             static LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let count = LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count < 3 {
-                let bb_peak = self.baseband_buffer.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
+            if count < 5 {
+                // NCO後のDC成分（信号がDCにあるか検証）
+                let bb_dc = self.baseband_buffer.iter().sum::<Complex<f32>>() / self.baseband_buffer.len().max(1) as f32;
                 let dec_peak = decimated.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
                 let demod_peak = self.demod_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-                let audio_peak = self.audio_buffer.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
                 log(&format!(
-                    "[process#{}] samples: iq={} bb={} dec={} demod={} audio={} | peaks: bb={:.4} dec={:.6} demod={:.4} audio={:.4}",
-                    count, iq_data.len(), self.baseband_buffer.len(), decimated.len(),
-                    self.demod_buffer.len(), self.audio_buffer.len(),
-                    bb_peak, dec_peak, demod_peak, audio_peak
+                    "[process#{}] bb_dc={:.4}+{:.4}j (mag={:.4}) dec_peak={:.4} demod_peak={:.4} audio_len={}",
+                    count, bb_dc.re, bb_dc.im, bb_dc.norm(), dec_peak, demod_peak, self.audio_buffer.len()
                 ));
             }
         }

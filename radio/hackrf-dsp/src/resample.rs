@@ -18,8 +18,11 @@ impl Resampler {
         let step = source_rate as f64 / target_rate as f64;
 
         let num_phases = 256;
-        // DEBUG: 固定17に戻して切り分け
-        let taps_per_phase = 17;
+        // step ≈ 1 で 17 タップ、step ≈ 4.2 で ~85 タップ。
+        let taps_per_phase = {
+            let raw = (step.ceil() as usize * 17).max(17);
+            raw | 1 // 奇数保証
+        };
         let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
 
         // source 側正規化周波数（Nyquist=0.5）

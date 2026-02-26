@@ -404,7 +404,8 @@ const onIfBandChange = async () => {
 
 /// モード名に対応するデフォルトの IF Max を返す
 const defaultIfMaxHzForMode = (mode: string): number => {
-  return mode === 'FM' ? 100_000 : 4_500;
+  // FM: 75kHz（demod_rate=200kHz のナイキスト100kHz に対して遷移帯域25kHz を確保）
+  return mode === 'FM' ? 75_000 : 4_500;
 };
 
 const onDemodModeChange = async () => {
