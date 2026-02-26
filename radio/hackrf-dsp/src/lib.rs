@@ -92,6 +92,8 @@ fn build_decimation_plan(sample_rate: f32, mode: DemodMode) -> DecimationPlan {
 #[wasm_bindgen]
 pub struct Receiver {
     sample_rate: f32,
+    coarse_factor: usize,
+    demod_factor: usize,
     coarse_stage_rate: f32,
     demod_sample_rate: f32,
     if_min_hz: f32,
@@ -119,6 +121,9 @@ pub struct Receiver {
     fft_buffer: Vec<f32>,
     fft_visible_buffer: Vec<f32>,
     fft_input_buffer: Vec<i8>,
+    io_iq_buffer: Vec<i8>,
+    io_audio_buffer: Vec<f32>,
+    io_fft_buffer: Vec<f32>,
 }
 
 fn sanitize_if_band(min_hz: f32, max_hz: f32, demod_sample_rate: f32) -> (f32, f32) {
@@ -218,6 +223,8 @@ impl Receiver {
 
         Self {
             sample_rate,
+            coarse_factor: plan.coarse_factor,
+            demod_factor: plan.demod_factor,
             coarse_stage_rate: plan.coarse_stage_rate,
             demod_sample_rate: plan.demod_sample_rate,
             if_min_hz,
@@ -268,6 +275,9 @@ impl Receiver {
             fft_buffer: vec![0.0; fft_size],
             fft_visible_buffer: vec![-120.0; fft_visible_len],
             fft_input_buffer: vec![0; fft_size * 2],
+            io_iq_buffer: Vec::new(),
+            io_audio_buffer: Vec::new(),
+            io_fft_buffer: Vec::new(),
         }
     }
 
@@ -304,6 +314,108 @@ impl Receiver {
     /// FFT入力を処理済みIQに切り替える（falseで生IQ）
     pub fn set_fft_use_processed(&mut self, enabled: bool) {
         self.fft_use_processed = enabled;
+    }
+
+    /// JS から直接読み書きするI/Oバッファを初期化する。
+    pub fn alloc_io_buffers(
+        &mut self,
+        max_iq_bytes: usize,
+        max_audio_samples: usize,
+        max_fft_bins: usize,
+    ) -> Result<(), JsValue> {
+        if max_iq_bytes == 0 || (max_iq_bytes & 1) != 0 {
+            return Err(JsValue::from_str("max_iq_bytes must be even and > 0"));
+        }
+        if max_audio_samples == 0 {
+            return Err(JsValue::from_str("max_audio_samples must be > 0"));
+        }
+        if max_fft_bins < self.fft_visible_len {
+            return Err(JsValue::from_str("max_fft_bins is smaller than visible FFT bins"));
+        }
+
+        self.io_iq_buffer = vec![0; max_iq_bytes];
+        self.io_audio_buffer = vec![0.0; max_audio_samples];
+        self.io_fft_buffer = vec![0.0; max_fft_bins];
+
+        let max_iq_samples = max_iq_bytes / 2;
+        let max_coarse = max_iq_samples / self.coarse_factor + 2;
+        let max_demod = max_coarse / self.demod_factor + 2;
+
+        self.baseband_buffer.reserve(max_iq_samples);
+        self.coarse_buffer.reserve(max_coarse);
+        self.demod_iq_buffer.reserve(max_demod);
+        self.demod_buffer.reserve(max_demod);
+        self.audio_buffer.reserve(max_audio_samples);
+        Ok(())
+    }
+
+    pub fn free_io_buffers(&mut self) {
+        self.io_iq_buffer.clear();
+        self.io_iq_buffer.shrink_to_fit();
+        self.io_audio_buffer.clear();
+        self.io_audio_buffer.shrink_to_fit();
+        self.io_fft_buffer.clear();
+        self.io_fft_buffer.shrink_to_fit();
+    }
+
+    pub fn iq_input_ptr(&self) -> u32 {
+        self.io_iq_buffer.as_ptr() as usize as u32
+    }
+
+    pub fn audio_output_ptr(&self) -> u32 {
+        self.io_audio_buffer.as_ptr() as usize as u32
+    }
+
+    pub fn fft_output_ptr(&self) -> u32 {
+        self.io_fft_buffer.as_ptr() as usize as u32
+    }
+
+    pub fn iq_input_capacity(&self) -> usize {
+        self.io_iq_buffer.len()
+    }
+
+    pub fn audio_output_capacity(&self) -> usize {
+        self.io_audio_buffer.len()
+    }
+
+    pub fn fft_output_capacity(&self) -> usize {
+        self.io_fft_buffer.len()
+    }
+
+    /// `alloc_io_buffers` で確保したI/Qバッファ先頭 `iq_len` バイトを入力として処理する。
+    pub fn process_iq_len(&mut self, iq_len: usize) -> Result<usize, JsValue> {
+        if self.io_iq_buffer.is_empty() || self.io_audio_buffer.is_empty() || self.io_fft_buffer.is_empty() {
+            return Err(JsValue::from_str("io buffers are not allocated"));
+        }
+        if iq_len == 0 || (iq_len & 1) != 0 {
+            return Err(JsValue::from_str("iq_len must be even and > 0"));
+        }
+        if iq_len > self.io_iq_buffer.len() {
+            return Err(JsValue::from_str("iq_len exceeds io_iq_buffer capacity"));
+        }
+
+        // io_iq_buffer の先頭領域を入力として読むだけで、process_internal では
+        // io_iq_buffer を変更しないため、raw pointer からの一時スライス化で確保を避ける。
+        let iq_ptr = self.io_iq_buffer.as_ptr();
+        let iq_slice = unsafe { std::slice::from_raw_parts(iq_ptr, iq_len) };
+        self.process_internal(iq_slice);
+
+        if self.audio_buffer.len() > self.io_audio_buffer.len() {
+            return Err(JsValue::from_str("audio output exceeds io_audio_buffer capacity"));
+        }
+        if self.fft_visible_buffer.len() > self.io_fft_buffer.len() {
+            return Err(JsValue::from_str("fft output exceeds io_fft_buffer capacity"));
+        }
+
+        let audio_len = self.audio_buffer.len();
+        if audio_len > 0 {
+            self.io_audio_buffer[..audio_len].copy_from_slice(&self.audio_buffer[..audio_len]);
+        }
+        let fft_len = self.fft_visible_buffer.len();
+        if fft_len > 0 {
+            self.io_fft_buffer[..fft_len].copy_from_slice(&self.fft_visible_buffer[..fft_len]);
+        }
+        Ok(audio_len)
     }
 
     /// 1ブロックのIQデータ(i8型)を受け取り、指定バッファへ結果を書き込む。

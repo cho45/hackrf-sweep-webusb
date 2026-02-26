@@ -16,11 +16,16 @@ vi.mock('../hackrf-dsp/pkg/hackrf_dsp', () => {
 		constructor(...args: any[]) {
 			hoisted.receiverCtor(...args);
 		}
-		process_into(_iqData: Int8Array, _audioOut: Float32Array, _fftOut: Float32Array) {
+		alloc_io_buffers() {}
+		free_io_buffers() {}
+		iq_input_ptr() { return 0; }
+		audio_output_ptr() { return 1024; }
+		fft_output_ptr() { return 2048; }
+		iq_input_capacity() { return 262144; }
+		audio_output_capacity() { return 4096; }
+		fft_output_capacity() { return 1024; }
+		process_iq_len(_iqLen: number) {
 			return 0;
-		}
-		process() {
-			return [];
 		}
 		free() {}
 	}
@@ -76,6 +81,7 @@ describe('RadioBackend', () => {
 	it('re-applies RF front-end settings on every startRx', async () => {
 		const { RadioBackend } = await import('./worker');
 		const backend = new RadioBackend();
+		(backend as any).wasmModule = { memory: { buffer: new ArrayBuffer(1024 * 1024) } };
 		const device = createMockDevice();
 		(backend as any).device = device;
 

@@ -7,6 +7,8 @@ type PerfStats = {
 	blocks: number;
 	blocksPerSec: number;
 	iqBytesPerSec: number;
+	droppedIqBlocks: number;
+	droppedIqBlocksPerSec: number;
 	blockIntervalMsAvg: number;
 	blockIntervalMsMax: number;
 	dspProcessMsAvg: number;
@@ -109,7 +111,7 @@ export class RadioBackend {
 			lnaGain: number;
 			vgaGain: number;
 		},
-		onData: (audioOut: Float32Array, fftOut: Float32Array, perf?: PerfStats) => void
+		onData: (audioOut: Float32Array, audioLen: number, fftOut: Float32Array, perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 		this.ampEnabled = options.ampEnabled;
@@ -150,17 +152,56 @@ export class RadioBackend {
 		const demodFactor = Math.max(1, Math.round(coarseRate / demodRate));
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
-		const audioScratchCapacity = Math.max(
+		const audioCapacity = Math.max(
 			1024,
 			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2)
 		);
-		const audioScratch = new Float32Array(audioScratchCapacity);
-		const fftScratch = new Float32Array(options.fftVisibleBins);
+		const fftCapacity = options.fftVisibleBins;
+		await this.receiver.alloc_io_buffers(
+			HackRF.TRANSFER_BUFFER_SIZE,
+			audioCapacity,
+			fftCapacity
+		);
+
+		if (!this.wasmModule || !this.wasmModule.memory) {
+			throw new Error("wasm memory is not initialized");
+		}
+		const wasmMemory: WebAssembly.Memory = this.wasmModule.memory;
+		const iqPtr = this.receiver.iq_input_ptr();
+		const audioPtr = this.receiver.audio_output_ptr();
+		const fftPtr = this.receiver.fft_output_ptr();
+		const iqCapacity = this.receiver.iq_input_capacity();
+		const audioOutCapacity = this.receiver.audio_output_capacity();
+		const fftOutCapacity = this.receiver.fft_output_capacity();
+
+		if (iqCapacity < HackRF.TRANSFER_BUFFER_SIZE) {
+			throw new Error("iq capacity is smaller than transfer block size");
+		}
+		if (audioOutCapacity < audioCapacity || fftOutCapacity < fftCapacity) {
+			throw new Error("allocated io capacity is smaller than requested");
+		}
+
+		let memoryBuffer = wasmMemory.buffer;
+		let iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
+		let audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
+		let fftReadView = new Float32Array(memoryBuffer, fftPtr, fftCapacity);
+
+		const ensureViews = () => {
+			if (memoryBuffer === wasmMemory.buffer) return;
+			memoryBuffer = wasmMemory.buffer;
+			iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
+			audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
+			fftReadView = new Float32Array(memoryBuffer, fftPtr, fftCapacity);
+		};
+
+		const audioScratch = new Float32Array(audioOutCapacity);
+		const fftScratch = new Float32Array(fftCapacity);
 
 		let perfWindowStart = performance.now();
 		let lastBlockAt = performance.now();
 		let blockCount = 0;
 		let iqBytes = 0;
+		let droppedIqBlocks = 0;
 		let blockIntervalMsSum = 0;
 		let blockIntervalMsMax = 0;
 		let processMsSum = 0;
@@ -179,6 +220,8 @@ export class RadioBackend {
 				blocks: blockCount,
 				blocksPerSec: blockCount / windowSec,
 				iqBytesPerSec: iqBytes / windowSec,
+				droppedIqBlocks,
+				droppedIqBlocksPerSec: droppedIqBlocks / windowSec,
 				blockIntervalMsAvg: blockIntervalMsSum / blockCount,
 				blockIntervalMsMax,
 				dspProcessMsAvg: processMsSum / blockCount,
@@ -191,6 +234,7 @@ export class RadioBackend {
 			perfWindowStart = now;
 			blockCount = 0;
 			iqBytes = 0;
+			droppedIqBlocks = 0;
 			blockIntervalMsSum = 0;
 			blockIntervalMsMax = 0;
 			processMsSum = 0;
@@ -213,23 +257,36 @@ export class RadioBackend {
 				blockIntervalMsMax = blockIntervalMs;
 			}
 
-			// Uint8Array は uint8 (0~255) だが HackRF の IQ データは i8 (-128~127) のため Int8Array にキャスト
-			const iqData = new Int8Array(data.buffer, data.byteOffset, data.byteLength);
+			if (data.byteLength > iqCapacity) {
+				droppedIqBlocks += 1;
+				return;
+			}
 
-			// WASM に IQ データ配列を渡し、復調処理とFFTを実行
+			// WASM I/O バッファへ転送後、長さだけ渡して処理する。
+			ensureViews();
+			iqWriteView.set(data.subarray(0, data.byteLength), 0);
 			const processStart = performance.now();
-			const audioLen = this.receiver.process_into(iqData, audioScratch, fftScratch);
+			let audioLen = 0;
+			try {
+				audioLen = this.receiver.process_iq_len(data.byteLength);
+			} catch (_e) {
+				droppedIqBlocks += 1;
+				return;
+			}
 			const processMs = performance.now() - processStart;
 			processMsSum += processMs;
 			if (processMs > processMsMax) {
 				processMsMax = processMs;
 			}
 			if (audioLen >= 0) {
-				const audioOut = audioScratch.subarray(0, audioLen);
+				if (audioLen > 0) {
+					audioScratch.set(audioReadView.subarray(0, audioLen), 0);
+				}
+				fftScratch.set(fftReadView);
 				audioSamplesOut += audioLen;
 				const callbackStart = performance.now();
 				const perf = snapshotPerf(callbackStart);
-				onData(audioOut, fftScratch, perf);
+				onData(audioScratch, audioLen, fftScratch, perf);
 				const callbackMs = performance.now() - callbackStart;
 				callbackMsSum += callbackMs;
 				if (callbackMs > callbackMsMax) {
@@ -244,6 +301,7 @@ export class RadioBackend {
 			await this.device.stopRx();
 		}
 		if (this.receiver) {
+			this.receiver.free_io_buffers();
 			this.receiver.free();
 			this.receiver = undefined;
 		}

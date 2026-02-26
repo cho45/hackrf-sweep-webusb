@@ -93,6 +93,7 @@
         <div>process ms(avg/max): {{ fmtNum(dspPerf.dspProcessMsAvg, 2) }} / {{ fmtNum(dspPerf.dspProcessMsMax, 2) }}</div>
         <div>cb ms(avg/max): {{ fmtNum(dspPerf.callbackMsAvg, 2) }} / {{ fmtNum(dspPerf.callbackMsMax, 2) }}</div>
         <div>IQ MB/s: {{ fmtNum(dspPerf.iqBytesPerSec / 1_000_000, 2) }}</div>
+        <div>dropped IQ blocks: {{ fmtInt(dspPerf.droppedIqBlocks) }} ({{ fmtNum(dspPerf.droppedIqBlocksPerSec, 2) }}/s)</div>
 
         <div style="margin-top: 8px;"><b>Draw</b></div>
         <div>fps: {{ fmtNum(drawPerf.fps, 1) }}</div>
@@ -252,6 +253,8 @@ type DspPerfStats = {
   blocks: number;
   blocksPerSec: number;
   iqBytesPerSec: number;
+  droppedIqBlocks: number;
+  droppedIqBlocksPerSec: number;
   blockIntervalMsAvg: number;
   blockIntervalMsMax: number;
   dspProcessMsAvg: number;
@@ -312,6 +315,8 @@ let drawMsMax = 0;
 const dspPerf = reactive({
   blocksPerSec: 0,
   iqBytesPerSec: 0,
+  droppedIqBlocks: 0,
+  droppedIqBlocksPerSec: 0,
   dspProcessMsAvg: 0,
   dspProcessMsMax: 0,
   callbackMsAvg: 0,
@@ -535,10 +540,13 @@ const initAudio = async () => {
   await audioCtx.resume();
 };
 
-const playAudioBuffer = (data: Float32Array) => {
+const playAudioBuffer = (data: Float32Array, length: number) => {
   if (!audioNode) return;
+  const safeLength = Math.max(0, Math.min(length, data.length));
+  if (safeLength === 0) return;
   // WASMメモリ再利用の影響を避けるため、明示的にコピーしてからWorkletへ渡す。
-  const chunk = new Float32Array(data);
+  const chunk = new Float32Array(safeLength);
+  chunk.set(data.subarray(0, safeLength));
   audioNode.port.postMessage({ type: 'push', data: chunk }, [chunk.buffer]);
 };
 
@@ -679,13 +687,17 @@ const start = async () => {
   startRenderLoop(canvasFftCtx, canvasFft);
 
   // Comlinkのコールバック関数は proxy に包む必要がある
-  const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array, perf?: DspPerfStats) => {
-    playAudioBuffer(audioOut);
-    // Wasm側バッファ再利用の影響を避けるためコピーして保持する
-    latestFftFrame = new Float32Array(fftOut);
+  const onData = Comlink.proxy((audioOut: Float32Array, audioLen: number, fftOut: Float32Array, perf?: DspPerfStats) => {
+    playAudioBuffer(audioOut, audioLen);
+    if (!latestFftFrame || latestFftFrame.length !== fftOut.length) {
+      latestFftFrame = new Float32Array(fftOut.length);
+    }
+    latestFftFrame.set(fftOut);
     if (perf) {
       dspPerf.blocksPerSec = perf.blocksPerSec;
       dspPerf.iqBytesPerSec = perf.iqBytesPerSec;
+      dspPerf.droppedIqBlocks = perf.droppedIqBlocks;
+      dspPerf.droppedIqBlocksPerSec = perf.droppedIqBlocksPerSec;
       dspPerf.dspProcessMsAvg = perf.dspProcessMsAvg;
       dspPerf.dspProcessMsMax = perf.dspProcessMsMax;
       dspPerf.callbackMsAvg = perf.callbackMsAvg;
