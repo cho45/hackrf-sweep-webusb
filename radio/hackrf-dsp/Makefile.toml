@@ -3,6 +3,14 @@
 command = "wasm-pack"
 args = ["build", "--target", "web", "--out-dir", "pkg"]
 
+[tasks.build-simd]
+env = { RUSTFLAGS = "-C target-feature=+simd128" }
+command = "wasm-pack"
+args = ["build", "--target", "web", "--out-dir", "pkg-simd"]
+
+[tasks.build-all]
+dependencies = ["build", "build-simd"]
+
 [tasks.build-node]
 command = "wasm-pack"
 args = ["build", "--target", "nodejs", "--out-dir", "node"]

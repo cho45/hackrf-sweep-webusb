@@ -1,5 +1,6 @@
 import { expose } from "comlink";
-import init, { Receiver } from "../hackrf-dsp/pkg/hackrf_dsp";
+import initBase, { Receiver as ReceiverBase } from "../hackrf-dsp/pkg/hackrf_dsp";
+import initSimd, { Receiver as ReceiverSimd } from "../hackrf-dsp/pkg-simd/hackrf_dsp";
 import { HackRF } from "./hackrf";
 
 type PerfStats = {
@@ -18,17 +19,112 @@ type PerfStats = {
 	audioSamplesPerSec: number;
 };
 
+type WasmInitFn = () => Promise<any>;
+type ReceiverCtor = new (
+	sampleRate: number,
+	centerFreq: number,
+	targetFreq: number,
+	demodMode: string,
+	outputSampleRate: number,
+	fftSize: number,
+	fftVisibleStartBin: number,
+	fftVisibleBins: number,
+	ifMinHz: number,
+	ifMaxHz: number,
+	dcCancelEnabled: boolean,
+	fftUseProcessed: boolean
+) => {
+	alloc_io_buffers: (maxIqBytes: number, maxAudioSamples: number, maxFftBins: number) => Promise<void> | void;
+	free_io_buffers: () => void;
+	iq_input_ptr: () => number;
+	audio_output_ptr: () => number;
+	fft_output_ptr: () => number;
+	iq_input_capacity: () => number;
+	audio_output_capacity: () => number;
+	fft_output_capacity: () => number;
+	process_iq_len: (iqLen: number) => number;
+	free: () => void;
+	set_target_freq: (centerFreq: number, targetFreq: number) => void;
+	set_if_band: (minHz: number, maxHz: number) => void;
+	set_dc_cancel_enabled: (enabled: boolean) => void;
+	set_fft_use_processed: (enabled: boolean) => void;
+};
+
+type WasmBindings = {
+	init: WasmInitFn;
+	Receiver: ReceiverCtor;
+	flavor: "simd" | "base";
+};
+
+const SIMD_PROBE_WASM = new Uint8Array([
+	0x00, 0x61, 0x73, 0x6d, // magic
+	0x01, 0x00, 0x00, 0x00, // version
+	0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, // type: (func (result i32))
+	0x03, 0x02, 0x01, 0x00, // function section
+	0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, // export "f"
+	0x0a, 0x19, 0x01, 0x17, 0x00, // code: 1 func, body size=23, local decl=0
+	0xfd, 0x0c, // v128.const
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 16-byte lane data
+	0xfd, 0x15, 0x00, // i8x16.extract_lane_s 0
+	0x0b, // end
+]);
+
+const supportsWasmSimd = () => {
+	if (typeof WebAssembly === "undefined" || typeof WebAssembly.validate !== "function") {
+		return false;
+	}
+	try {
+		return WebAssembly.validate(SIMD_PROBE_WASM);
+	} catch {
+		return false;
+	}
+};
+
+const BASE_BINDINGS: WasmBindings = {
+	init: initBase as WasmInitFn,
+	Receiver: ReceiverBase as unknown as ReceiverCtor,
+	flavor: "base",
+};
+
+const SIMD_BINDINGS: WasmBindings = {
+	init: initSimd as WasmInitFn,
+	Receiver: ReceiverSimd as unknown as ReceiverCtor,
+	flavor: "simd",
+};
+
 export class RadioBackend {
 	device?: HackRF;
-	receiver?: Receiver;
+	receiver?: InstanceType<ReceiverCtor>;
 	wasmModule?: any;
+	private wasmBindings?: WasmBindings;
 	private ampEnabled = false;
 	private antennaEnabled = false;
 	private lnaGain = 16;
 	private vgaGain = 16;
 
+	private async ensureWasm() {
+		if (!this.wasmBindings) {
+			this.wasmBindings = supportsWasmSimd() ? SIMD_BINDINGS : BASE_BINDINGS;
+		}
+		if (!this.wasmModule) {
+			if (this.wasmBindings.flavor === "simd") {
+				try {
+					this.wasmModule = await this.wasmBindings.init();
+				} catch (e) {
+					console.warn("[radio] failed to initialize SIMD wasm; falling back to base wasm", e);
+					this.wasmBindings = BASE_BINDINGS;
+					this.wasmModule = await this.wasmBindings.init();
+				}
+			} else {
+				this.wasmModule = await this.wasmBindings.init();
+			}
+			console.info(`[radio] loaded wasm flavor: ${this.wasmBindings.flavor}`);
+		}
+	}
+
 	async init() {
-		this.wasmModule = await init();
+		await this.ensureWasm();
 		return true;
 	}
 
@@ -114,13 +210,15 @@ export class RadioBackend {
 		onData: (audioOut: Float32Array, audioLen: number, fftOut: Float32Array, perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
+		await this.ensureWasm();
+		if (!this.wasmBindings) throw new Error("wasm bindings are not initialized");
 		this.ampEnabled = options.ampEnabled;
 		this.antennaEnabled = options.antennaEnabled;
 		this.lnaGain = options.lnaGain;
 		this.vgaGain = options.vgaGain;
 
 		// Rust Wasm側のReceiverインスタンスを作成
-		this.receiver = new Receiver(
+		this.receiver = new this.wasmBindings.Receiver(
 			options.sampleRate,
 			options.centerFreq,
 			options.targetFreq,

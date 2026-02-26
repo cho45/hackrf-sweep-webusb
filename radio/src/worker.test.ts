@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const hoisted = vi.hoisted(() => ({
 	expose: vi.fn(),
-	init: vi.fn(async () => ({})),
+	init: vi.fn(async () => ({ memory: { buffer: new ArrayBuffer(1024 * 1024) } })),
 	receiverCtor: vi.fn(),
 	mockHackrfInstances: [] as any[],
 }));
@@ -11,7 +11,7 @@ vi.mock('comlink', () => ({
 	expose: hoisted.expose,
 }));
 
-vi.mock('../hackrf-dsp/pkg/hackrf_dsp', () => {
+const createWasmMockModule = () => {
 	class Receiver {
 		constructor(...args: any[]) {
 			hoisted.receiverCtor(...args);
@@ -34,6 +34,14 @@ vi.mock('../hackrf-dsp/pkg/hackrf_dsp', () => {
 		default: hoisted.init,
 		Receiver,
 	};
+};
+
+vi.mock('../hackrf-dsp/pkg/hackrf_dsp', () => {
+	return createWasmMockModule();
+});
+
+vi.mock('../hackrf-dsp/pkg-simd/hackrf_dsp', () => {
+	return createWasmMockModule();
 });
 
 vi.mock('./hackrf', () => {

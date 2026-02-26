@@ -9,6 +9,12 @@ mod resample;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bench;
 
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use std::arch::wasm32::{
+    f32x4_convert_i32x4, f32x4_mul, f32x4_splat, i16x8_extend_high_i8x16,
+    i16x8_extend_low_i8x16, i32x4_extend_high_i16x8, i32x4_extend_low_i16x8, v128, v128_load,
+    v128_store,
+};
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
 
@@ -156,6 +162,25 @@ fn sanitize_fft_view(fft_size: usize, start_bin: usize, visible_bins: usize) -> 
 fn float_to_i8(sample: f32) -> i8 {
     let scaled = (sample.clamp(-1.0, 0.992_187_5) * 128.0).round();
     scaled as i8
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[inline]
+unsafe fn unpack_iq16_to_f32_simd(src_iq: *const i8, dst_f32: *mut f32) {
+    let scale = f32x4_splat(1.0 / 128.0);
+    let packed = v128_load(src_iq as *const v128);
+    let lo_i16 = i16x8_extend_low_i8x16(packed);
+    let hi_i16 = i16x8_extend_high_i8x16(packed);
+
+    let f0 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(lo_i16)), scale);
+    let f1 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(lo_i16)), scale);
+    let f2 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(hi_i16)), scale);
+    let f3 = f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(hi_i16)), scale);
+
+    v128_store(dst_f32 as *mut v128, f0);
+    v128_store(dst_f32.add(4) as *mut v128, f1);
+    v128_store(dst_f32.add(8) as *mut v128, f2);
+    v128_store(dst_f32.add(12) as *mut v128, f3);
 }
 
 #[wasm_bindgen]
@@ -439,6 +464,106 @@ impl Receiver {
 }
 
 impl Receiver {
+    fn process_no_dc_path(&mut self, iq_data: &[i8], fft_n: usize) {
+        if self.fft_use_processed {
+            self.process_no_dc_with_fft(iq_data, fft_n);
+        } else {
+            self.process_no_dc_without_fft(iq_data);
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn process_no_dc_with_fft(&mut self, iq_data: &[i8], fft_n: usize) {
+        let num_samples = iq_data.len() / 2;
+        let mut idx = 0usize;
+        let mut unpacked = [0.0f32; 16];
+
+        while idx + 8 <= num_samples {
+            unsafe {
+                unpack_iq16_to_f32_simd(iq_data.as_ptr().add(idx * 2), unpacked.as_mut_ptr());
+            }
+
+            for lane in 0..8usize {
+                let n = lane * 2;
+                let sample = Complex::new(unpacked[n], unpacked[n + 1]);
+                let nco_val = self.nco.step();
+                self.baseband_buffer.push(sample * nco_val);
+
+                let out_idx = idx + lane;
+                if out_idx < fft_n {
+                    let fft_pos = out_idx * 2;
+                    self.fft_input_buffer[fft_pos] = float_to_i8(sample.re);
+                    self.fft_input_buffer[fft_pos + 1] = float_to_i8(sample.im);
+                }
+            }
+            idx += 8;
+        }
+
+        for (tail, iq) in iq_data[idx * 2..].chunks_exact(2).enumerate() {
+            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+            let nco_val = self.nco.step();
+            self.baseband_buffer.push(sample * nco_val);
+
+            let out_idx = idx + tail;
+            if out_idx < fft_n {
+                let fft_pos = out_idx * 2;
+                self.fft_input_buffer[fft_pos] = float_to_i8(sample.re);
+                self.fft_input_buffer[fft_pos + 1] = float_to_i8(sample.im);
+            }
+        }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    fn process_no_dc_with_fft(&mut self, iq_data: &[i8], fft_n: usize) {
+        for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
+            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+            let nco_val = self.nco.step();
+            self.baseband_buffer.push(sample * nco_val);
+
+            if idx < fft_n {
+                let n = idx * 2;
+                self.fft_input_buffer[n] = float_to_i8(sample.re);
+                self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
+            }
+        }
+    }
+
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    fn process_no_dc_without_fft(&mut self, iq_data: &[i8]) {
+        let num_samples = iq_data.len() / 2;
+        let mut idx = 0usize;
+        let mut unpacked = [0.0f32; 16];
+
+        while idx + 8 <= num_samples {
+            unsafe {
+                unpack_iq16_to_f32_simd(iq_data.as_ptr().add(idx * 2), unpacked.as_mut_ptr());
+            }
+
+            for lane in 0..8usize {
+                let n = lane * 2;
+                let sample = Complex::new(unpacked[n], unpacked[n + 1]);
+                let nco_val = self.nco.step();
+                self.baseband_buffer.push(sample * nco_val);
+            }
+            idx += 8;
+        }
+
+        for iq in iq_data[idx * 2..].chunks_exact(2) {
+            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+            let nco_val = self.nco.step();
+            self.baseband_buffer.push(sample * nco_val);
+        }
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+    fn process_no_dc_without_fft(&mut self, iq_data: &[i8]) {
+        for iq in iq_data.chunks_exact(2) {
+            let sample = Complex::new(iq[0] as f32 / 128.0, iq[1] as f32 / 128.0);
+            let nco_val = self.nco.step();
+            self.baseband_buffer.push(sample * nco_val);
+        }
+    }
+
     fn process_internal(&mut self, iq_data: &[i8]) {
         let num_samples = iq_data.len() / 2;
         let fft_n = self.fft.get_n();
@@ -463,19 +588,7 @@ impl Receiver {
                 }
             }
         } else {
-            for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
-                let i_val = iq[0] as f32 / 128.0;
-                let q_val = iq[1] as f32 / 128.0;
-                let sample = Complex::new(i_val, q_val);
-                let nco_val = self.nco.step();
-                self.baseband_buffer.push(sample * nco_val);
-
-                if self.fft_use_processed && idx < fft_n {
-                    let n = idx * 2;
-                    self.fft_input_buffer[n] = float_to_i8(sample.re);
-                    self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
-                }
-            }
+            self.process_no_dc_path(iq_data, fft_n);
         }
 
         // デシメーション (粗段: rx->1Msps, 固定段: 1Msps->demod_rate)

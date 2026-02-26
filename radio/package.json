@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build:wasm": "cd hackrf-dsp && wasm-pack build --target web --out-dir pkg --mode no-install --no-opt",
+    "build:wasm:base": "cd hackrf-dsp && wasm-pack build --target web --out-dir pkg --mode no-install --no-opt",
+    "build:wasm:simd": "cd hackrf-dsp && RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --out-dir pkg-simd --mode no-install --no-opt",
+    "build:wasm": "npm run build:wasm:base && npm run build:wasm:simd",
     "build:full": "npm run build:wasm && npm run build",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",

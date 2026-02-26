@@ -131,6 +131,9 @@ cd radio
 npm run build:wasm
 ```
 
+`build:wasm` は通常版（`hackrf-dsp/pkg`）と SIMD 版（`hackrf-dsp/pkg-simd`）の両方を生成します。  
+実行時は Worker 側で `simd128` 対応を判定し、対応環境では SIMD 版を、非対応または初期化失敗時は通常版を使います。
+
 ### フロント開発サーバ
 
 ```sh
@@ -159,6 +162,16 @@ npm run build
 cd radio/hackrf-dsp
 cargo run --release --bin bench_pipeline
 ```
+
+必要なケースだけ実行する場合:
+
+```sh
+BENCH_MODE=FM BENCH_SR=20 BENCH_DC=off cargo run --release --bin bench_pipeline
+```
+
+- `BENCH_MODE`: `AM` / `FM`
+- `BENCH_SR`: `20`（Msps）または `20000000`（Hz）
+- `BENCH_DC`: `on` / `off`
 
 ## ライセンス
 
