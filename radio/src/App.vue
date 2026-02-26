@@ -130,6 +130,7 @@
       class="canvas-container"
       ref="canvasContainer"
       @pointermove="onCanvasPointerMove"
+      @click="onCanvasClick"
       @pointerleave="hideCanvasPointerFreq"
       @pointercancel="hideCanvasPointerFreq"
     >
@@ -301,6 +302,7 @@ type DspPerfStats = {
 };
 const keypadField = ref<KeypadField | null>(null);
 const keypadOpenToken = ref(0);
+const keypadPrefillHz = ref<number | null>(null);
 const keypadTitle = computed(() =>
   keypadField.value === 'span' ? 'Span' : 'Target Frequency'
 );
@@ -314,12 +316,16 @@ const unitFactor = (unit: DisplayUnit): number => {
   if (unit === 'kHz') return 1_000;
   return 1;
 };
-const keypadUnit = computed<DisplayUnit>(() => {
-  if (keypadField.value === 'span') return pickDisplayUnit(spanHz.value);
-  return pickDisplayUnit(targetFreq.value);
+const keypadSourceHz = computed(() => {
+  if (keypadPrefillHz.value !== null) return keypadPrefillHz.value;
+  if (keypadField.value === 'span') return spanHz.value;
+  return targetFreq.value;
 });
+const keypadUnit = computed<DisplayUnit>(() => pickDisplayUnit(keypadSourceHz.value));
 const keypadInitialValue = computed(() => {
-  return '0';
+  const factor = unitFactor(keypadUnit.value);
+  const precision = keypadUnit.value === 'Hz' ? 0 : 3;
+  return (keypadSourceHz.value / factor).toFixed(precision);
 });
 
 const options = reactive({
@@ -422,20 +428,37 @@ const clamp = (value: number, min: number, max: number) => Math.min(max, Math.ma
 
 const pointerLabelYOffset = 25;
 
-const onCanvasPointerMove = (event: PointerEvent) => {
+const freqAtClientX = (clientX: number) => {
   const container = canvasContainer.value;
-  if (!container) return;
+  if (!container) return null;
   const rect = container.getBoundingClientRect();
-  if (rect.width <= 0) return;
+  if (rect.width <= 0) return null;
 
-  const localX = clamp(event.clientX - rect.left, 0, rect.width);
-  const localY = clamp(event.clientY - rect.top, 0, rect.height);
+  const localX = clamp(clientX - rect.left, 0, rect.width);
   const ratio = localX / rect.width;
+  return {
+    rect,
+    localX,
+    hz: displayMinFreq.value + spanHz.value * ratio,
+  };
+};
+
+const onCanvasPointerMove = (event: PointerEvent) => {
+  const xInfo = freqAtClientX(event.clientX);
+  if (!xInfo) return;
+  const { rect, localX, hz } = xInfo;
+  const localY = clamp(event.clientY - rect.top, 0, rect.height);
 
   pointerFreq.visible = true;
-  pointerFreq.hz = displayMinFreq.value + spanHz.value * ratio;
+  pointerFreq.hz = hz;
   pointerFreq.x = clamp(localX, 56, Math.max(56, rect.width - 56));
   pointerFreq.y = clamp(localY + pointerLabelYOffset, 14, Math.max(14, rect.height - 14));
+};
+
+const onCanvasClick = (event: MouseEvent) => {
+  const xInfo = freqAtClientX(event.clientX);
+  if (!xInfo) return;
+  openKeypad('target', xInfo.hz);
 };
 
 const hideCanvasPointerFreq = () => {
@@ -498,13 +521,17 @@ const onTuneChange = async () => {
   }
 };
 
-const openKeypad = (field: KeypadField) => {
+const openKeypad = (field: KeypadField, prefillHz?: number) => {
+  keypadPrefillHz.value = typeof prefillHz === 'number' && Number.isFinite(prefillHz)
+    ? Math.round(prefillHz)
+    : null;
   keypadField.value = field;
   keypadOpenToken.value += 1;
 };
 
 const closeKeypad = () => {
   keypadField.value = null;
+  keypadPrefillHz.value = null;
 };
 
 const openSettings = () => {

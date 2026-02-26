@@ -143,6 +143,31 @@ describe('App.vue', () => {
 		requestDeviceSpy.mockRestore();
 	});
 
+	it('opens target keypad with clicked frequency prefilled', async () => {
+		const wrapper = mount(App);
+		const canvasContainer = wrapper.find('.canvas-container');
+		expect(canvasContainer.exists()).toBe(true);
+
+		vi.spyOn(canvasContainer.element, 'getBoundingClientRect').mockReturnValue({
+			x: 100,
+			y: 0,
+			left: 100,
+			top: 0,
+			width: 1000,
+			height: 600,
+			right: 1100,
+			bottom: 600,
+			toJSON: () => ({}),
+		} as DOMRect);
+
+		await canvasContainer.trigger('click', { clientX: 1100, clientY: 100 });
+		await flushPromises();
+
+		expect(wrapper.text()).toContain('Input Target Frequency');
+		expect(wrapper.find('.keypad-display .val').text()).toBe('1.775');
+		expect(wrapper.find('.keypad-display .unit').text()).toBe('MHz');
+	});
+
 	it('wires audio port to backend on start', async () => {
 		const requestDeviceSpy = vi.spyOn(navigator.usb, 'requestDevice').mockResolvedValue({
 			vendorId: 0x1d50,
