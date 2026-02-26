@@ -256,7 +256,7 @@ const demodMode = ref(loadedSettings.demodMode);
 const settingsOpen = ref(false);
 
 const defaultIfBandForMode = (mode: string): { minHz: number; maxHz: number } => {
-  return mode === 'FM' ? { minHz: 0, maxHz: 75_000 } : { minHz: 0, maxHz: 4_500 };
+  return mode === 'FM' ? { minHz: 0, maxHz: 98_000 } : { minHz: 0, maxHz: 4_500 };
 };
 
 const maxSpanHz = maxHackRFSampleRate;

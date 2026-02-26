@@ -770,6 +770,100 @@ mod tests {
         assert!(diff < 1e-3, "lhs={} rhs={} diff={}", a, b, diff);
     }
 
+    fn build_stereo_mpx(fs_hz: f32, len: usize, left_hz: f32, right_hz: f32) -> Vec<f32> {
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f32 / fs_hz;
+            let l = 0.5 * (2.0 * std::f32::consts::PI * left_hz * t).sin();
+            let r = 0.5 * (2.0 * std::f32::consts::PI * right_hz * t).sin();
+            let lp = l + r;
+            let lr = l - r;
+            let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t).cos();
+            let dsb = lr * (2.0 * std::f32::consts::PI * 38_000.0 * t).cos();
+            out.push(0.45 * lp + pilot + 0.45 * dsb);
+        }
+        out
+    }
+
+    fn fm_modulate_to_i8_iq(mpx: &[f32], fs_hz: f32, max_dev_hz: f32) -> Vec<i8> {
+        let mut out = Vec::with_capacity(mpx.len() * 2);
+        let mut phase = 0.0f32;
+        let scale = 0.8 * 127.0;
+        for &x in mpx {
+            let inst_freq = max_dev_hz * x;
+            phase += 2.0 * std::f32::consts::PI * inst_freq / fs_hz;
+            if phase > std::f32::consts::PI {
+                phase -= 2.0 * std::f32::consts::TAU;
+            } else if phase < -std::f32::consts::PI {
+                phase += std::f32::consts::TAU;
+            }
+            let i = (phase.cos() * scale).round().clamp(-127.0, 127.0) as i8;
+            let q = (phase.sin() * scale).round().clamp(-127.0, 127.0) as i8;
+            out.push(i);
+            out.push(q);
+        }
+        out
+    }
+
+    fn run_fm_receiver_audio(iq: &[i8], if_max_hz: f32) -> (Vec<f32>, ReceiverStats) {
+        let mut rx = Receiver::new(
+            2_000_000.0,
+            100_000_000.0,
+            100_000_000.0,
+            "FM",
+            48_000.0,
+            1024,
+            0,
+            1024,
+            0.0,
+            if_max_hz,
+            true,
+        );
+        rx.set_fm_stereo_enabled(true);
+
+        let mut audio_all = Vec::<f32>::new();
+        let mut audio_out = vec![0.0f32; 8192];
+        let mut fft_out = vec![0.0f32; 1024];
+        let block_bytes = 16_384usize;
+        for chunk in iq.chunks(block_bytes) {
+            let n = rx.process_into(chunk, &mut audio_out, &mut fft_out);
+            audio_all.extend_from_slice(&audio_out[..n]);
+        }
+        (audio_all, rx.get_stats())
+    }
+
+    fn split_stereo_interleaved(samples: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let frames = samples.len() / 2;
+        let mut left = Vec::with_capacity(frames);
+        let mut right = Vec::with_capacity(frames);
+        for frame in samples.chunks_exact(2) {
+            left.push(frame[0]);
+            right.push(frame[1]);
+        }
+        (left, right)
+    }
+
+    fn tone_amp(signal: &[f32], fs_hz: f32, freq_hz: f32) -> f32 {
+        if signal.is_empty() {
+            return 0.0;
+        }
+        let w = 2.0 * std::f32::consts::PI * freq_hz / fs_hz;
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        for (n, &x) in signal.iter().enumerate() {
+            let phi = w * n as f32;
+            re += x * phi.cos();
+            im -= x * phi.sin();
+        }
+        2.0 * (re.hypot(im)) / signal.len() as f32
+    }
+
+    fn separation_db(main: f32, leak: f32) -> f32 {
+        let num = main.abs().max(1e-9);
+        let den = leak.abs().max(1e-9);
+        20.0 * (num / den).log10()
+    }
+
     #[test]
     fn decimation_plan_fits_candidate_rates_for_am() {
         for (sr, expected_coarse) in [
@@ -855,6 +949,83 @@ mod tests {
         for (idx, exp) in (5usize..=9).zip(expected.iter()) {
             assert!((bins[idx] - exp).abs() < 1e-4, "idx={} got={} expected={}", idx, bins[idx], exp);
         }
+    }
+
+    #[test]
+    fn fm_pipeline_end_to_end_stereo_separation_is_observable() {
+        let fs = 2_000_000.0f32;
+        let n = 1_000_000usize;
+        let mpx = build_stereo_mpx(fs, n, 1_000.0, 2_000.0);
+        let iq = fm_modulate_to_i8_iq(&mpx, fs, FM_MAX_DEVIATION_HZ);
+
+        let (audio, stats) = run_fm_receiver_audio(&iq, 98_000.0);
+        assert!(stats.stereo_blend() > 0.50, "stereo blend too low: {}", stats.stereo_blend());
+        assert!(stats.stereo_locked(), "stereo did not lock in e2e pipeline");
+
+        let (left, right) = split_stereo_interleaved(&audio);
+        assert!(left.len() > 8_000, "too few audio samples: {}", left.len());
+
+        // 立ち上がり過渡を捨てる
+        let skip = left.len() / 4;
+        let l = &left[skip..];
+        let r = &right[skip..];
+
+        let l_main = tone_amp(l, 48_000.0, 1_000.0);
+        let l_leak = tone_amp(l, 48_000.0, 2_000.0);
+        let r_main = tone_amp(r, 48_000.0, 2_000.0);
+        let r_leak = tone_amp(r, 48_000.0, 1_000.0);
+        let sep_l = separation_db(l_main, l_leak);
+        let sep_r = separation_db(r_main, r_leak);
+
+        assert!(
+            sep_l > 3.0,
+            "left separation too low in e2e pipeline: sep_l={}dB (main={} leak={})",
+            sep_l,
+            l_main,
+            l_leak
+        );
+        assert!(
+            sep_r > 3.0,
+            "right separation too low in e2e pipeline: sep_r={}dB (main={} leak={})",
+            sep_r,
+            r_main,
+            r_leak
+        );
+    }
+
+    #[test]
+    fn fm_pipeline_end_to_end_too_narrow_if_degrades_separation() {
+        let fs = 2_000_000.0f32;
+        let n = 1_000_000usize;
+        // 高めのオーディオ帯域で差を見やすくする。
+        let mpx = build_stereo_mpx(fs, n, 9_000.0, 11_000.0);
+        let iq = fm_modulate_to_i8_iq(&mpx, fs, FM_MAX_DEVIATION_HZ);
+
+        // 45kHz は FMステレオ用としては明確に狭すぎる設定。
+        let (audio_narrow, _) = run_fm_receiver_audio(&iq, 45_000.0);
+        let (audio_wide, _) = run_fm_receiver_audio(&iq, 98_000.0);
+        let (left_n, right_n) = split_stereo_interleaved(&audio_narrow);
+        let (left_w, right_w) = split_stereo_interleaved(&audio_wide);
+        let skip_n = left_n.len() / 4;
+        let skip_w = left_w.len() / 4;
+        let ln = &left_n[skip_n..];
+        let rn = &right_n[skip_n..];
+        let lw = &left_w[skip_w..];
+        let rw = &right_w[skip_w..];
+
+        let sep_n_l = separation_db(tone_amp(ln, 48_000.0, 9_000.0), tone_amp(ln, 48_000.0, 11_000.0));
+        let sep_n_r = separation_db(tone_amp(rn, 48_000.0, 11_000.0), tone_amp(rn, 48_000.0, 9_000.0));
+        let sep_w_l = separation_db(tone_amp(lw, 48_000.0, 9_000.0), tone_amp(lw, 48_000.0, 11_000.0));
+        let sep_w_r = separation_db(tone_amp(rw, 48_000.0, 11_000.0), tone_amp(rw, 48_000.0, 9_000.0));
+        let sep_n = 0.5 * (sep_n_l + sep_n_r);
+        let sep_w = 0.5 * (sep_w_l + sep_w_r);
+
+        assert!(
+            sep_w > sep_n + 1.5,
+            "wider IF did not improve e2e separation enough: narrow={}dB wide={}dB",
+            sep_n,
+            sep_w
+        );
     }
 
     #[cfg(target_arch = "wasm32")]

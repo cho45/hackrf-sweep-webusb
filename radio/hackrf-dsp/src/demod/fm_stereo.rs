@@ -1,3 +1,5 @@
+use crate::filter::FirFilter;
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FMStereoStats {
     pub pilot_level: f32,
@@ -6,7 +8,24 @@ pub struct FMStereoStats {
     pub mono_fallback_count: u32,
 }
 
+const AUDIO_FIR_TAPS: usize = 128;
+const AUDIO_LPF_CUTOFF_HZ: f32 = 15_000.0;
+const PILOT_DETECT_LPF_HZ: f32 = 40.0;
+const PLL_BW_HZ: f32 = 12.0;
+const PLL_DAMPING: f32 = 0.707;
+const PLL_MAX_FREQ_ERR_HZ: f32 = 400.0;
+
 /// FM MPX から L/R を復元する簡易ステレオデコーダ。
+///
+/// MPX の周波数配置（FM復調後）:
+/// - 0..15kHz: `L+R`（モノラル成分）
+/// - 19kHz: pilot
+/// - 38kHz を中心とする `23..53kHz`（= 38±15kHz）: DSB-SC の `L-R`
+///
+/// 実装方針:
+/// - pilot(19kHz) の位相を推定して 38kHz 同期検波の基準位相を作る
+/// - `x * cos(2*pilot_phase)` で `L-R` をベースバンドへ落として LPF
+/// - `L = (L+R) + (L-R)`, `R = (L+R) - (L-R)` で合成
 ///
 /// - pilot(19kHz) は複素同期検波で位相を追従
 /// - L-R は 38kHz 同期検波 + LPF
@@ -26,14 +45,19 @@ pub struct FMStereoDecoder {
     pilot_i_hi_lp: f32,
     pilot_q_hi_lp: f32,
     pilot_lp_alpha: f32,
+    pilot_phase_err_last: f32,
+    pll_kp: f32,
+    pll_ki: f32,
+    pll_freq_corr: f32,
+    pll_freq_corr_max: f32,
 
     dc_prev_x: f32,
     dc_prev_y: f32,
     dc_hp_a: f32,
 
-    sum_lp: f32,
-    diff_lp: f32,
-    audio_lp_alpha: f32,
+    sum_lpf: FirFilter,
+    diff_i_lpf: FirFilter,
+    diff_q_lpf: FirFilter,
 
     deemphasis_alpha: Option<f32>,
     deemphasis_l: f32,
@@ -80,6 +104,13 @@ fn clamp01(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
+fn pilot_phase_error_from_iq(i: f32, q: f32) -> f32 {
+    // 19k位相は 180度反転しても 38k 再生には等価なので、
+    // 2倍角で誤差を求めて π 曖昧性を吸収する。
+    let twice_err = (2.0 * i * q).atan2(i * i - q * q);
+    0.5 * twice_err
+}
+
 impl FMStereoDecoder {
     pub fn new(sample_rate_hz: f32, deemphasis_tau_us: Option<f32>) -> Self {
         assert!(sample_rate_hz > 0.0, "sample_rate_hz must be > 0");
@@ -87,15 +118,18 @@ impl FMStereoDecoder {
         let pilot_omega = 2.0 * std::f32::consts::PI * 19_000.0 / sample_rate_hz;
         let pilot_lo_omega = 2.0 * std::f32::consts::PI * 18_000.0 / sample_rate_hz;
         let pilot_hi_omega = 2.0 * std::f32::consts::PI * 20_000.0 / sample_rate_hz;
-        let pilot_lp_alpha = alpha_from_cutoff(sample_rate_hz, 250.0);
+        let pilot_lp_alpha = alpha_from_cutoff(sample_rate_hz, PILOT_DETECT_LPF_HZ);
         let dc_hp_a = (-2.0 * std::f32::consts::PI * 30.0 / sample_rate_hz).exp();
-        let audio_lp_alpha = alpha_from_cutoff(sample_rate_hz, 15_000.0);
         let pilot_level_alpha = alpha_from_tau(sample_rate_hz, 0.02);
         let pilot_power_alpha = alpha_from_tau(sample_rate_hz, 0.02);
         let pilot_fraction_alpha = alpha_from_tau(sample_rate_hz, 0.03);
         let pilot_quality_alpha = alpha_from_tau(sample_rate_hz, 0.05);
         let blend_attack_alpha = alpha_from_tau(sample_rate_hz, 0.03);
         let blend_release_alpha = alpha_from_tau(sample_rate_hz, 0.20);
+        let wn = 2.0 * std::f32::consts::PI * PLL_BW_HZ / sample_rate_hz;
+        let pll_kp = 2.0 * PLL_DAMPING * wn;
+        let pll_ki = wn * wn;
+        let pll_freq_corr_max = 2.0 * std::f32::consts::PI * PLL_MAX_FREQ_ERR_HZ / sample_rate_hz;
         let deemphasis_alpha = deemphasis_tau_us.and_then(|tau_us| {
             if tau_us <= 0.0 {
                 return None;
@@ -117,12 +151,26 @@ impl FMStereoDecoder {
             pilot_i_hi_lp: 0.0,
             pilot_q_hi_lp: 0.0,
             pilot_lp_alpha,
+            pilot_phase_err_last: 0.0,
+            pll_kp,
+            pll_ki,
+            pll_freq_corr: 0.0,
+            pll_freq_corr_max,
             dc_prev_x: 0.0,
             dc_prev_y: 0.0,
             dc_hp_a,
-            sum_lp: 0.0,
-            diff_lp: 0.0,
-            audio_lp_alpha,
+            sum_lpf: FirFilter::new_lowpass_hamming(
+                AUDIO_FIR_TAPS,
+                AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
+            ),
+            diff_i_lpf: FirFilter::new_lowpass_hamming(
+                AUDIO_FIR_TAPS,
+                AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
+            ),
+            diff_q_lpf: FirFilter::new_lowpass_hamming(
+                AUDIO_FIR_TAPS,
+                AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
+            ),
             deemphasis_alpha,
             deemphasis_l: 0.0,
             deemphasis_r: 0.0,
@@ -160,10 +208,13 @@ impl FMStereoDecoder {
         self.pilot_q_lo_lp = 0.0;
         self.pilot_i_hi_lp = 0.0;
         self.pilot_q_hi_lp = 0.0;
+        self.pilot_phase_err_last = 0.0;
+        self.pll_freq_corr = 0.0;
         self.dc_prev_x = 0.0;
         self.dc_prev_y = 0.0;
-        self.sum_lp = 0.0;
-        self.diff_lp = 0.0;
+        self.sum_lpf.reset();
+        self.diff_i_lpf.reset();
+        self.diff_q_lpf.reset();
         self.deemphasis_l = 0.0;
         self.deemphasis_r = 0.0;
         self.pilot_level = 0.0;
@@ -195,6 +246,7 @@ impl FMStereoDecoder {
             let s19 = self.pilot_phase.sin();
 
             // 19k pilot の複素包絡を推定し、位相オフセットを取り出す。
+            // ここで得た位相を 2倍して 38k の同期検波器を作る。
             let pilot_i = x * c19;
             let pilot_q = -x * s19;
             let pilot_mix_power_inst = pilot_i * pilot_i + pilot_q * pilot_q;
@@ -216,7 +268,12 @@ impl FMStereoDecoder {
             self.pilot_i_hi_lp += self.pilot_lp_alpha * (pilot_i_hi - self.pilot_i_hi_lp);
             self.pilot_q_hi_lp += self.pilot_lp_alpha * (pilot_q_hi - self.pilot_q_hi_lp);
 
-            let pilot_phase_err = self.pilot_q_lp.atan2(self.pilot_i_lp);
+            let pilot_phase_err = pilot_phase_error_from_iq(self.pilot_i_lp, self.pilot_q_lp);
+            self.pilot_phase_err_last = pilot_phase_err;
+            // 2次PLL: 位相誤差でNCOの周波数補正を更新し、狭帯域で安定追従させる。
+            self.pll_freq_corr =
+                (self.pll_freq_corr + self.pll_ki * pilot_phase_err).clamp(-self.pll_freq_corr_max, self.pll_freq_corr_max);
+            let pilot_phase_locked = self.pilot_phase + pilot_phase_err;
             let pilot_coherent_power = self.pilot_i_lp * self.pilot_i_lp + self.pilot_q_lp * self.pilot_q_lp;
             let pilot_side_power = 0.5
                 * ((self.pilot_i_lo_lp * self.pilot_i_lo_lp + self.pilot_q_lo_lp * self.pilot_q_lo_lp)
@@ -252,15 +309,27 @@ impl FMStereoDecoder {
             }
             self.stereo_locked = locked_now;
 
-            let c38 = (2.0 * (self.pilot_phase + pilot_phase_err)).cos();
-            let lr_raw = 2.0 * x * c38;
+            // `L-R` は 38kHz 抑圧搬送波 (DSB-SC) なので、38k同期検波でベースバンドへ戻す。
+            // 周波数領域では:
+            // - 入力: 38±15kHz の帯域（23..53kHz）
+            // - 同期検波後: 0..15kHz (+ 2*38k 近傍の高域項)
+            // - 後段LPFで 0..15kHz を取り出す
+            let c38 = (2.0 * pilot_phase_locked).cos();
+            let s38 = (2.0 * pilot_phase_locked).sin();
+            let lr_i_raw = 2.0 * x * c38;
+            let lr_q_raw = -2.0 * x * s38;
 
-            self.sum_lp += self.audio_lp_alpha * (x - self.sum_lp);
-            self.diff_lp += self.audio_lp_alpha * (lr_raw - self.diff_lp);
+            // 128tap Hamming FIR を明示的に通して `L+R`, `L-R` を抽出する。
+            // - L+R: MPX低域(0..15kHz)
+            // - L-R: 同期検波後の低域(0..15kHz)、I/QをそれぞれLPF
+            let sum = self.sum_lpf.process_sample(x);
+            let diff_i = self.diff_i_lpf.process_sample(lr_i_raw);
+            let _ = self.diff_q_lpf.process_sample(lr_q_raw);
 
-            let lr = self.diff_lp * self.stereo_blend;
-            let mut l = self.sum_lp + lr;
-            let mut r = self.sum_lp - lr;
+            // lock 品質に応じて blend を掛け、誤ロック時は差分成分を自動で弱める。
+            let lr = diff_i * self.stereo_blend;
+            let mut l = sum + lr;
+            let mut r = sum - lr;
 
             if let Some(alpha) = self.deemphasis_alpha {
                 self.deemphasis_l += alpha * (l - self.deemphasis_l);
@@ -272,17 +341,25 @@ impl FMStereoDecoder {
             left.push(l);
             right.push(r);
 
-            self.pilot_phase += self.pilot_omega;
+            let loop_term = self.pll_freq_corr + self.pll_kp * pilot_phase_err;
+            let phase_step = self.pilot_omega + loop_term;
+            self.pilot_phase += phase_step;
             if self.pilot_phase >= 2.0 * std::f32::consts::PI {
                 self.pilot_phase -= 2.0 * std::f32::consts::PI;
+            } else if self.pilot_phase < 0.0 {
+                self.pilot_phase += 2.0 * std::f32::consts::PI;
             }
-            self.pilot_lo_phase += self.pilot_lo_omega;
+            self.pilot_lo_phase += self.pilot_lo_omega + loop_term;
             if self.pilot_lo_phase >= 2.0 * std::f32::consts::PI {
                 self.pilot_lo_phase -= 2.0 * std::f32::consts::PI;
+            } else if self.pilot_lo_phase < 0.0 {
+                self.pilot_lo_phase += 2.0 * std::f32::consts::PI;
             }
-            self.pilot_hi_phase += self.pilot_hi_omega;
+            self.pilot_hi_phase += self.pilot_hi_omega + loop_term;
             if self.pilot_hi_phase >= 2.0 * std::f32::consts::PI {
                 self.pilot_hi_phase -= 2.0 * std::f32::consts::PI;
+            } else if self.pilot_hi_phase < 0.0 {
+                self.pilot_hi_phase += 2.0 * std::f32::consts::PI;
             }
         }
     }
@@ -316,6 +393,52 @@ mod tests {
         mpx
     }
 
+    fn build_stereo_mpx_from_program(fs: f32, left: &[f32], right: &[f32]) -> Vec<f32> {
+        assert_eq!(left.len(), right.len());
+        let mut mpx = Vec::with_capacity(left.len());
+        for i in 0..left.len() {
+            let t = i as f32 / fs;
+            let lp = left[i] + right[i];
+            let lr = left[i] - right[i];
+            let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t).cos();
+            let dsb = lr * (2.0 * std::f32::consts::PI * 38_000.0 * t).cos();
+            mpx.push(0.45 * lp + pilot + 0.45 * dsb);
+        }
+        mpx
+    }
+
+    fn build_stereo_mpx_from_program_with_phase(
+        fs: f32,
+        left: &[f32],
+        right: &[f32],
+        pilot_phase: f32,
+    ) -> Vec<f32> {
+        assert_eq!(left.len(), right.len());
+        let mut mpx = Vec::with_capacity(left.len());
+        for i in 0..left.len() {
+            let t = i as f32 / fs;
+            let lp = left[i] + right[i];
+            let lr = left[i] - right[i];
+            let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t + pilot_phase).cos();
+            let dsb =
+                lr * (2.0 * std::f32::consts::PI * 38_000.0 * t + 2.0 * pilot_phase).cos();
+            mpx.push(0.45 * lp + pilot + 0.45 * dsb);
+        }
+        mpx
+    }
+
+    fn build_program_signal(fs: f32, len: usize, freqs_hz: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; len];
+        for (k, &f) in freqs_hz.iter().enumerate() {
+            let amp = 0.20 / (1.0 + k as f32 * 0.35);
+            for (n, y) in out.iter_mut().enumerate() {
+                let t = n as f32 / fs;
+                *y += amp * (2.0 * std::f32::consts::PI * f * t).sin();
+            }
+        }
+        out
+    }
+
     fn build_noise(len: usize, seed: u32, gain: f32) -> Vec<f32> {
         let mut state = seed;
         (0..len)
@@ -327,27 +450,275 @@ mod tests {
             .collect()
     }
 
-    fn tone_amplitude(samples: &[f32], sample_rate: f32, freq_hz: f32) -> f32 {
+    fn build_mono_with_pilot_mpx(fs: f32, len: usize, noise_gain: f32) -> Vec<f32> {
+        let noise = build_noise(len, 0x8765_4321, noise_gain);
+        let mut mpx = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f32 / fs;
+            let mono = 0.55 * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin();
+            let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t).cos();
+            mpx.push(mono + pilot + noise[i]);
+        }
+        mpx
+    }
+
+    fn rms(samples: &[f32]) -> f32 {
         if samples.is_empty() {
             return 0.0;
         }
-        let mut i_acc = 0.0f32;
-        let mut q_acc = 0.0f32;
-        for (n, &x) in samples.iter().enumerate() {
-            let t = n as f32 / sample_rate;
-            let phase = 2.0 * std::f32::consts::PI * freq_hz * t;
-            i_acc += x * phase.cos();
-            q_acc += x * phase.sin();
+        (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+    }
+
+    fn estimate_mix_coeffs(y: &[f32], x1: &[f32], x2: &[f32]) -> (f32, f32) {
+        assert_eq!(y.len(), x1.len());
+        assert_eq!(y.len(), x2.len());
+
+        let mut s11 = 0.0f32;
+        let mut s22 = 0.0f32;
+        let mut s12 = 0.0f32;
+        let mut t1 = 0.0f32;
+        let mut t2 = 0.0f32;
+
+        for i in 0..y.len() {
+            let a = x1[i];
+            let b = x2[i];
+            let v = y[i];
+            s11 += a * a;
+            s22 += b * b;
+            s12 += a * b;
+            t1 += a * v;
+            t2 += b * v;
         }
-        2.0 * (i_acc * i_acc + q_acc * q_acc).sqrt() / samples.len() as f32
+        let det = s11 * s22 - s12 * s12;
+        if det.abs() < 1e-9 {
+            return (0.0, 0.0);
+        }
+        let inv = 1.0 / det;
+        let c1 = inv * (s22 * t1 - s12 * t2);
+        let c2 = inv * (-s12 * t1 + s11 * t2);
+        (c1, c2)
+    }
+
+    fn ratio_db(main: f32, leak: f32) -> f32 {
+        let num = main.abs().max(1e-9);
+        let den = leak.abs().max(1e-9);
+        20.0 * (num / den).log10()
     }
 
     #[test]
-    fn stereo_separates_left_and_right_tones() {
-        let fs = 200_000.0f32;
-        let n = 200_000usize;
+    fn pilot_phase_detector_polarity_is_input_minus_local() {
+        // pilot_i=cos(θ-φ), pilot_q=+sin(θ-φ) なので、
+        // 検出誤差は (θ-φ) になるべき。
+        for delta in [-1.2f32, -0.7, -0.2, 0.2, 0.7, 1.2] {
+            let i = delta.cos();
+            let q = delta.sin();
+            let err = pilot_phase_error_from_iq(i, q);
+            let expected = delta;
+            let abs_err = (err - expected).abs();
+            assert!(
+                abs_err < 1e-4,
+                "phase detector polarity mismatch: delta={} err={} expected={} abs_err={}",
+                delta,
+                err,
+                expected,
+                abs_err
+            );
+        }
+    }
 
-        let mpx = build_stereo_mpx(fs, n);
+    #[test]
+    fn pll_tracks_pilot_frequency_offset() {
+        let fs = 200_000.0f32;
+        let n = 220_000usize;
+        for pilot_hz in [19_030.0f32, 18_970.0f32] {
+            let mut mpx = Vec::with_capacity(n);
+            for i in 0..n {
+                let t = i as f32 / fs;
+                let pilot = 0.18 * (2.0 * std::f32::consts::PI * pilot_hz * t).cos();
+                // 現実に近づけるため、低域プログラム成分を少量足す。
+                let mono = 0.10 * (2.0 * std::f32::consts::PI * 1_200.0 * t).sin();
+                mpx.push(mono + pilot);
+            }
+
+            let mut dec = FMStereoDecoder::new(fs, None);
+            let mut l = Vec::new();
+            let mut r = Vec::new();
+            for chunk in mpx.chunks(4096) {
+                dec.process(chunk, &mut l, &mut r);
+            }
+
+            let expected = 2.0 * std::f32::consts::PI * (pilot_hz - 19_000.0) / fs;
+            let corr = dec.pll_freq_corr;
+            let corr_abs_err = (corr.abs() - expected.abs()).abs();
+            assert!(
+                corr.abs() > 1e-4,
+                "PLL frequency correction did not move: got={} expected={} pilot_hz={}",
+                corr,
+                expected,
+                pilot_hz
+            );
+            assert!(
+                corr.signum() == expected.signum(),
+                "PLL correction sign mismatch: got={} expected={} pilot_hz={}",
+                corr,
+                expected,
+                pilot_hz
+            );
+            assert!(
+                corr_abs_err < 0.0012,
+                "PLL frequency correction mismatch: got={} expected={} abs_err={} pilot_hz={}",
+                corr,
+                expected,
+                corr_abs_err,
+                pilot_hz
+            );
+        }
+    }
+
+    #[test]
+    fn pll_lock_aligns_pilot_to_i_axis() {
+        let fs = 200_000.0f32;
+        let n = 220_000usize;
+        let pilot_phase = 0.9f32;
+        let mut mpx = Vec::with_capacity(n);
+        for i in 0..n {
+            let t = i as f32 / fs;
+            let pilot = 0.18 * (2.0 * std::f32::consts::PI * 19_000.0 * t + pilot_phase).cos();
+            let mono = 0.05 * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin();
+            mpx.push(mono + pilot);
+        }
+
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l = Vec::new();
+        let mut r = Vec::new();
+        for chunk in mpx.chunks(4096) {
+            dec.process(chunk, &mut l, &mut r);
+        }
+
+        let i_abs = dec.pilot_i_lp.abs();
+        let q_abs = dec.pilot_q_lp.abs();
+        let q_over_i = q_abs / (i_abs + 1e-9);
+        assert!(
+            q_over_i < 0.35,
+            "PLL did not align pilot on I-axis: i_lp={} q_lp={} q_over_i={}",
+            dec.pilot_i_lp,
+            dec.pilot_q_lp,
+            q_over_i
+        );
+        assert!(
+            dec.pilot_phase_err_last.abs() < 0.35,
+            "PLL phase error did not converge near zero: err={}",
+            dec.pilot_phase_err_last
+        );
+    }
+
+    #[test]
+    fn stereo_separation_is_stable_with_pilot_phase_offset() {
+        let fs = 200_000.0f32;
+        let n = 240_000usize;
+        let pilot_phase = 1.1f32;
+        let left_src = build_program_signal(fs, n, &[700.0, 1_300.0, 2_100.0, 3_700.0]);
+        let right_src = build_program_signal(fs, n, &[900.0, 1_700.0, 2_900.0, 4_300.0]);
+        let mpx = build_stereo_mpx_from_program_with_phase(fs, &left_src, &right_src, pilot_phase);
+
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l_out = Vec::new();
+        let mut r_out = Vec::new();
+        dec.process(&mpx, &mut l_out, &mut r_out);
+
+        let skip = 30_000usize;
+        let l = &l_out[skip..];
+        let r = &r_out[skip..];
+        let left_ref = &left_src[skip..];
+        let right_ref = &right_src[skip..];
+
+        let (ll, lr) = estimate_mix_coeffs(l, left_ref, right_ref);
+        let (rl, rr) = estimate_mix_coeffs(r, left_ref, right_ref);
+        let sep_l_db = ratio_db(ll, lr);
+        let sep_r_db = ratio_db(rr, rl);
+
+        assert!(
+            sep_l_db > 6.0,
+            "left separation too low with pilot phase offset: ll={} lr={} sep_l_db={}",
+            ll,
+            lr,
+            sep_l_db
+        );
+        assert!(
+            sep_r_db > 6.0,
+            "right separation too low with pilot phase offset: rr={} rl={} sep_r_db={}",
+            rr,
+            rl,
+            sep_r_db
+        );
+    }
+
+    #[test]
+    fn stereo_separation_matrix_has_reasonable_crosstalk_db() {
+        let fs = 200_000.0f32;
+        let n = 240_000usize;
+        let left_src = build_program_signal(fs, n, &[700.0, 1_300.0, 2_100.0, 3_700.0]);
+        let right_src = build_program_signal(fs, n, &[900.0, 1_700.0, 2_900.0, 4_300.0]);
+        let mpx = build_stereo_mpx_from_program(fs, &left_src, &right_src);
+
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l_out = Vec::new();
+        let mut r_out = Vec::new();
+        dec.process(&mpx, &mut l_out, &mut r_out);
+
+        let skip = 30_000usize;
+        let l = &l_out[skip..];
+        let r = &r_out[skip..];
+        let left_ref = &left_src[skip..];
+        let right_ref = &right_src[skip..];
+
+        let (ll, lr) = estimate_mix_coeffs(l, left_ref, right_ref);
+        let (rl, rr) = estimate_mix_coeffs(r, left_ref, right_ref);
+        let sep_l_db = ratio_db(ll, lr);
+        let sep_r_db = ratio_db(rr, rl);
+
+        assert!(
+            sep_l_db > 6.0,
+            "left channel separation too low: ll={} lr={} sep_l_db={}",
+            ll,
+            lr,
+            sep_l_db
+        );
+        assert!(
+            sep_r_db > 6.0,
+            "right channel separation too low: rr={} rl={} sep_r_db={}",
+            rr,
+            rl,
+            sep_r_db
+        );
+
+        let st = dec.stats();
+        assert!(st.stereo_blend > 0.5, "stereo blend did not rise enough: {}", st.stereo_blend);
+        assert!(st.stereo_locked, "stereo did not lock");
+    }
+
+    #[test]
+    fn clean_stereo_reaches_high_blend() {
+        let fs = 200_000.0f32;
+        let mpx = build_stereo_mpx(fs, 220_000);
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l = Vec::new();
+        let mut r = Vec::new();
+        dec.process(&mpx, &mut l, &mut r);
+
+        let st = dec.stats();
+        assert!(st.stereo_locked, "stereo should lock on clean multiplex: {:?}", st);
+        assert!(
+            st.stereo_blend > 0.75,
+            "stereo blend too low on clean multiplex: {:?}",
+            st
+        );
+    }
+
+    #[test]
+    fn mono_program_with_pilot_keeps_lr_difference_low() {
+        let fs = 200_000.0f32;
+        let mpx = build_mono_with_pilot_mpx(fs, 220_000, 0.01);
 
         let mut dec = FMStereoDecoder::new(fs, None);
         let mut l_out = Vec::new();
@@ -357,18 +728,53 @@ mod tests {
         let skip = 20_000usize;
         let l = &l_out[skip..];
         let r = &r_out[skip..];
+        let mut sum = Vec::with_capacity(l.len());
+        let mut diff = Vec::with_capacity(l.len());
+        for i in 0..l.len() {
+            sum.push(0.5 * (l[i] + r[i]));
+            diff.push(0.5 * (l[i] - r[i]));
+        }
 
-        let l_1k = tone_amplitude(l, fs, 1_000.0);
-        let l_2k = tone_amplitude(l, fs, 2_000.0);
-        let r_1k = tone_amplitude(r, fs, 1_000.0);
-        let r_2k = tone_amplitude(r, fs, 2_000.0);
+        let sum_rms = rms(&sum);
+        let diff_rms = rms(&diff);
+        assert!(sum_rms > 1e-4, "sum rms too small");
+        assert!(
+            diff_rms < sum_rms * 0.12,
+            "mono+pilot should keep L-R low, got sum_rms={} diff_rms={}",
+            sum_rms,
+            diff_rms
+        );
+    }
 
-        assert!(l_1k > l_2k * 2.0, "left ch separation too low: 1k={} 2k={}", l_1k, l_2k);
-        assert!(r_2k > r_1k * 2.0, "right ch separation too low: 2k={} 1k={}", r_2k, r_1k);
+    #[test]
+    fn mono_program_with_pilot_under_higher_noise_limits_lr_leakage() {
+        let fs = 200_000.0f32;
+        let mpx = build_mono_with_pilot_mpx(fs, 220_000, 0.05);
 
-        let st = dec.stats();
-        assert!(st.stereo_blend > 0.5, "stereo blend did not rise enough: {}", st.stereo_blend);
-        assert!(st.stereo_locked, "stereo did not lock");
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l_out = Vec::new();
+        let mut r_out = Vec::new();
+        dec.process(&mpx, &mut l_out, &mut r_out);
+
+        let skip = 20_000usize;
+        let l = &l_out[skip..];
+        let r = &r_out[skip..];
+        let mut sum = Vec::with_capacity(l.len());
+        let mut diff = Vec::with_capacity(l.len());
+        for i in 0..l.len() {
+            sum.push(0.5 * (l[i] + r[i]));
+            diff.push(0.5 * (l[i] - r[i]));
+        }
+        let sum_rms = rms(&sum);
+        let diff_rms = rms(&diff);
+
+        assert!(sum_rms > 1e-4, "sum rms too small");
+        assert!(
+            diff_rms < sum_rms * 0.20,
+            "mono+pilot (higher noise) leaks too much L-R: sum_rms={} diff_rms={}",
+            sum_rms,
+            diff_rms
+        );
     }
 
     #[test]

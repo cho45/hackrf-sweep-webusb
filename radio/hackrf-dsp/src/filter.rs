@@ -51,6 +51,49 @@ fn design_bandpass_coeffs(num_taps: usize, min_norm: f32, max_norm: f32) -> Vec<
     high.iter().zip(low.iter()).map(|(h, l)| h - l).collect()
 }
 
+/// 実数ストリーム向け FIR フィルタ。
+/// 係数は実数で、1サンプルずつ処理する。
+pub struct FirFilter {
+    coeffs: Vec<f32>,
+    delay: Vec<f32>,
+    pos: usize,
+}
+
+impl FirFilter {
+    /// Hamming窓のLPFを作る。
+    /// `cutoff_norm` は入力サンプルレート基準（Nyquist=0.5）。
+    pub fn new_lowpass_hamming(num_taps: usize, cutoff_norm: f32) -> Self {
+        let coeffs = design_lowpass_coeffs(num_taps, cutoff_norm);
+        Self {
+            delay: vec![0.0; num_taps],
+            coeffs,
+            pos: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.delay.fill(0.0);
+        self.pos = 0;
+    }
+
+    pub fn process_sample(&mut self, x: f32) -> f32 {
+        self.delay[self.pos] = x;
+
+        let mut acc = 0.0f32;
+        let mut idx = self.pos;
+        for &h in &self.coeffs {
+            acc += h * self.delay[idx];
+            idx = if idx == 0 { self.delay.len() - 1 } else { idx - 1 };
+        }
+
+        self.pos += 1;
+        if self.pos >= self.delay.len() {
+            self.pos = 0;
+        }
+        acc
+    }
+}
+
 /// 複素ベースバンド用デシメーションフィルタ (簡単なCICやFIR)
 /// HackRF（例えば2MHz）から音声レート（たとえば48kHzなど）へとサンプリングレートを落とす。
 /// レート変換比（Decimation factor） M とします。
@@ -516,5 +559,73 @@ mod tests {
         let skip = 50usize.min(out.len().saturating_sub(1));
         let dc_power = out[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>() / (out.len() - skip) as f32;
         assert!(dc_power < 1e-3, "Band-pass should reject DC, got dc_power={}", dc_power);
+    }
+
+    fn tone_amplitude(samples: &[f32], sample_rate: f32, freq_hz: f32) -> f32 {
+        if samples.is_empty() {
+            return 0.0;
+        }
+        let mut i_acc = 0.0f32;
+        let mut q_acc = 0.0f32;
+        for (n, &x) in samples.iter().enumerate() {
+            let t = n as f32 / sample_rate;
+            let phase = 2.0 * std::f32::consts::PI * freq_hz * t;
+            i_acc += x * phase.cos();
+            q_acc += x * phase.sin();
+        }
+        2.0 * (i_acc * i_acc + q_acc * q_acc).sqrt() / samples.len() as f32
+    }
+
+    fn freq_response_mag(coeffs: &[f32], sample_rate: f32, freq_hz: f32) -> f32 {
+        let w = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        for (n, &h) in coeffs.iter().enumerate() {
+            let phase = -w * n as f32;
+            re += h * phase.cos();
+            im += h * phase.sin();
+        }
+        (re * re + im * im).sqrt()
+    }
+
+    #[test]
+    fn fir_filter_lowpass_hamming_rejects_19khz() {
+        let fs = 200_000.0f32;
+        let mut fir = FirFilter::new_lowpass_hamming(128, 15_000.0 / fs);
+        let n = 200_000usize;
+        let mut out = vec![0.0f32; n];
+
+        for (i, y) in out.iter_mut().enumerate() {
+            let t = i as f32 / fs;
+            let x = 0.5 * (2.0 * std::f32::consts::PI * 1_000.0 * t).sin()
+                + 0.5 * (2.0 * std::f32::consts::PI * 19_000.0 * t).sin();
+            *y = fir.process_sample(x);
+        }
+
+        let settled = &out[2_000..];
+        let a1 = tone_amplitude(settled, fs, 1_000.0);
+        let a19 = tone_amplitude(settled, fs, 19_000.0);
+        let rej_db = 20.0 * (a1.max(1e-9) / a19.max(1e-9)).log10();
+
+        assert!(
+            rej_db > 18.0,
+            "19k rejection is too weak: a1={} a19={} rej_db={}",
+            a1,
+            a19,
+            rej_db
+        );
+    }
+
+    #[test]
+    fn lowpass_128tap_15khz_has_around_50db_pilot_rejection() {
+        let fs = 200_000.0f32;
+        let coeffs = design_lowpass_coeffs(128, 15_000.0 / fs);
+        let mag_19k = freq_response_mag(&coeffs, fs, 19_000.0).max(1e-9);
+        let rej_db = -20.0 * mag_19k.log10();
+        assert!(
+            rej_db > 50.0,
+            "19k rejection too small for 128tap/15kHz LPF: rej_db={}",
+            rej_db
+        );
     }
 }
