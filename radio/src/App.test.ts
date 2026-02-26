@@ -33,14 +33,15 @@ vi.mock('comlink', () => ({
 			setLnaGain = vi.fn(async () => {});
 			setAmpEnable = vi.fn(async () => {});
 			setAntennaEnable = vi.fn(async () => {});
-			setAudioPort = vi.fn(async () => {});
-			startRx = vi.fn(async () => {});
-			stopRx = vi.fn(async () => {});
-			close = vi.fn(async () => {});
-			setDcCancelEnabled = vi.fn(async () => {});
-			constructor() {
-				hoisted.backendInstances.push(this);
-			}
+				setAudioPort = vi.fn(async () => {});
+				startRx = vi.fn(async () => {});
+				stopRx = vi.fn(async () => {});
+				close = vi.fn(async () => {});
+				setDcCancelEnabled = vi.fn(async () => {});
+				setFmStereoEnabled = vi.fn(async () => {});
+				constructor() {
+					hoisted.backendInstances.push(this);
+				}
 		};
 	},
 	proxy: (v: any) => v,

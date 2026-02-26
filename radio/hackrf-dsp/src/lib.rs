@@ -108,6 +108,7 @@ pub struct Receiver {
     if_min_hz: f32,
     if_max_hz: f32,
     dc_cancel_enabled: bool,
+    fm_stereo_enabled: bool,
     fft_visible_start: usize,
     fft_visible_len: usize,
     mode: DemodMode,
@@ -279,6 +280,9 @@ impl Receiver {
         let demod_fir_taps = compute_fir_taps(plan.demod_factor);
         let min_cutoff_norm = if_min_hz / plan.coarse_stage_rate;
         let max_cutoff_norm = if_max_hz / plan.coarse_stage_rate;
+        let mut fm_demod = FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate);
+        fm_demod.set_deemphasis_tau_us(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US));
+        fm_demod.set_deemphasis_enabled(false);
 
         log(&format!(
             "[Receiver::new] mode={:?} sr={} coarse_factor={} coarse_sr={} demod_factor={} demod_sr={} target_demod_rate={} if=[{},{}]",
@@ -332,6 +336,7 @@ impl Receiver {
             if_min_hz,
             if_max_hz,
             dc_cancel_enabled,
+            fm_stereo_enabled: true,
             fft_visible_start,
             fft_visible_len,
             mode,
@@ -364,7 +369,7 @@ impl Receiver {
                 f
             },
             am_demod: AMDemodulator::new(),
-            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate),
+            fm_demod,
             fm_stereo: FMStereoDecoder::new(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US)),
             resampler,
             resampler_right,
@@ -393,6 +398,10 @@ impl Receiver {
         if self.mode == DemodMode::Fm {
             // リチューン時はFM復調・ステレオ判定の状態を引きずらない。
             self.fm_demod = FMDemodulator::new(FM_MAX_DEVIATION_HZ, self.demod_sample_rate);
+            self.fm_demod
+                .set_deemphasis_tau_us(self.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US));
+            self.fm_demod
+                .set_deemphasis_enabled(!self.fm_stereo_enabled);
             self.fm_stereo.reset();
         }
     }
@@ -409,6 +418,10 @@ impl Receiver {
         if self.mode == DemodMode::Fm {
             // IF帯域変更時も過去状態が混ざらないようにリセットする。
             self.fm_demod = FMDemodulator::new(FM_MAX_DEVIATION_HZ, self.demod_sample_rate);
+            self.fm_demod
+                .set_deemphasis_tau_us(self.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US));
+            self.fm_demod
+                .set_deemphasis_enabled(!self.fm_stereo_enabled);
             self.fm_stereo.reset();
         }
     }
@@ -424,6 +437,19 @@ impl Receiver {
     /// FFT表示の DC 近傍補間を有効/無効にする
     pub fn set_dc_cancel_enabled(&mut self, enabled: bool) {
         self.dc_cancel_enabled = enabled;
+    }
+
+    /// FMステレオ復調の有効/無効を設定する（無効時はFMを強制MONOで出力）
+    pub fn set_fm_stereo_enabled(&mut self, enabled: bool) {
+        if self.fm_stereo_enabled == enabled {
+            return;
+        }
+        self.fm_stereo_enabled = enabled;
+        if self.mode == DemodMode::Fm {
+            self.fm_stereo.reset();
+            self.fm_demod.set_deemphasis_enabled(!enabled);
+            self.fm_demod.reset_audio_state();
+        }
     }
 
     /// JS から直接読み書きするI/Oバッファを初期化する。
@@ -504,7 +530,7 @@ impl Receiver {
     }
 
     pub fn get_stats(&self) -> ReceiverStats {
-        let stereo = if self.mode == DemodMode::Fm {
+        let stereo = if self.mode == DemodMode::Fm && self.fm_stereo_enabled {
             self.fm_stereo.stats()
         } else {
             FMStereoStats::default()
@@ -656,29 +682,42 @@ impl Receiver {
                     .process(&self.demod_buffer, &mut self.audio_buffer);
             }
             DemodMode::Fm => {
-                // FMは MPX -> Stereo Decode -> resample(L/R) -> interleave
-                self.fm_stereo.process(
-                    &self.demod_buffer,
-                    &mut self.stereo_left_buffer,
-                    &mut self.stereo_right_buffer,
-                );
+                if self.fm_stereo_enabled {
+                    // FMは MPX -> Stereo Decode -> resample(L/R) -> interleave
+                    self.fm_stereo.process(
+                        &self.demod_buffer,
+                        &mut self.stereo_left_buffer,
+                        &mut self.stereo_right_buffer,
+                    );
 
-                self.audio_left_resampled.clear();
-                self.audio_right_resampled.clear();
-                self.resampler
-                    .process(&self.stereo_left_buffer, &mut self.audio_left_resampled);
-                self.resampler_right
-                    .process(&self.stereo_right_buffer, &mut self.audio_right_resampled);
+                    self.audio_left_resampled.clear();
+                    self.audio_right_resampled.clear();
+                    self.resampler
+                        .process(&self.stereo_left_buffer, &mut self.audio_left_resampled);
+                    self.resampler_right
+                        .process(&self.stereo_right_buffer, &mut self.audio_right_resampled);
 
-                let frames = self
-                    .audio_left_resampled
-                    .len()
-                    .min(self.audio_right_resampled.len());
-                self.audio_buffer.clear();
-                self.audio_buffer.reserve(frames * 2);
-                for i in 0..frames {
-                    self.audio_buffer.push(self.audio_left_resampled[i]);
-                    self.audio_buffer.push(self.audio_right_resampled[i]);
+                    let frames = self
+                        .audio_left_resampled
+                        .len()
+                        .min(self.audio_right_resampled.len());
+                    self.audio_buffer.clear();
+                    self.audio_buffer.reserve(frames * 2);
+                    for i in 0..frames {
+                        self.audio_buffer.push(self.audio_left_resampled[i]);
+                        self.audio_buffer.push(self.audio_right_resampled[i]);
+                    }
+                } else {
+                    // FMステレオ無効時はFM復調器側のdeemphasis済みmonoを左右同一出力。
+                    self.audio_left_resampled.clear();
+                    self.resampler
+                        .process(&self.demod_buffer, &mut self.audio_left_resampled);
+                    self.audio_buffer.clear();
+                    self.audio_buffer.reserve(self.audio_left_resampled.len() * 2);
+                    for &sample in &self.audio_left_resampled {
+                        self.audio_buffer.push(sample);
+                        self.audio_buffer.push(sample);
+                    }
                 }
             }
         }

@@ -49,6 +49,7 @@ type ReceiverCtor = new (
 	set_target_freq: (centerFreq: number, targetFreq: number) => void;
 	set_if_band: (minHz: number, maxHz: number) => void;
 	set_dc_cancel_enabled: (enabled: boolean) => void;
+	set_fm_stereo_enabled: (enabled: boolean) => void;
 };
 
 type WasmBindings = {
@@ -104,6 +105,7 @@ export class RadioBackend {
 	private antennaEnabled = false;
 	private lnaGain = 16;
 	private vgaGain = 16;
+	private fmStereoEnabled = true;
 	private fftVisibleBins = 0;
 
 	private async ensureWasm() {
@@ -218,12 +220,13 @@ export class RadioBackend {
 			ifMinHz: number;
 			ifMaxHz: number;
 			dcCancelEnabled: boolean;
+			fmStereoEnabled: boolean;
 			ampEnabled: boolean;
 			antennaEnabled: boolean;
-				lnaGain: number;
-				vgaGain: number;
-			},
-			onData: (fftOut: Float32Array, perf?: PerfStats) => void
+			lnaGain: number;
+			vgaGain: number;
+		},
+		onData: (fftOut: Float32Array, perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 		await this.ensureWasm();
@@ -232,6 +235,7 @@ export class RadioBackend {
 		this.antennaEnabled = options.antennaEnabled;
 		this.lnaGain = options.lnaGain;
 		this.vgaGain = options.vgaGain;
+		this.fmStereoEnabled = options.fmStereoEnabled;
 
 		// Rust Wasm側のReceiverインスタンスを作成
 		this.receiver = new this.wasmBindings.Receiver(
@@ -247,6 +251,7 @@ export class RadioBackend {
 			options.ifMaxHz,
 			options.dcCancelEnabled
 		);
+		this.receiver.set_fm_stereo_enabled(this.fmStereoEnabled);
 
 		// デバイス側にサンプリングレートおよび周波数を設定
 		// stop/start の繰り返しでRF設定が揮発するケースを避けるため、毎回再適用する。
@@ -469,6 +474,13 @@ export class RadioBackend {
 	async setDcCancelEnabled(enabled: boolean) {
 		if (this.receiver) {
 			this.receiver.set_dc_cancel_enabled(enabled);
+		}
+	}
+
+	async setFmStereoEnabled(enabled: boolean) {
+		this.fmStereoEnabled = enabled;
+		if (this.receiver) {
+			this.receiver.set_fm_stereo_enabled(enabled);
 		}
 	}
 

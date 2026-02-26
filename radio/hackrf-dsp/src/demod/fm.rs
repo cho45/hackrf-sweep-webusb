@@ -17,6 +17,9 @@ pub struct FMDemodulator {
     prev: Complex<f32>,
     /// 出力正規化ゲイン: 1 / (2π * Δf_max / fs)
     gain: f32,
+    deemphasis_alpha: Option<f32>,
+    deemphasis_enabled: bool,
+    deemphasis_state: f32,
 }
 
 impl FMDemodulator {
@@ -29,7 +32,31 @@ impl FMDemodulator {
         Self {
             prev: Complex::new(1.0, 0.0),
             gain,
+            deemphasis_alpha: None,
+            deemphasis_enabled: false,
+            deemphasis_state: 0.0,
         }
+    }
+
+    pub fn set_deemphasis_tau_us(&mut self, sample_rate_hz: f32, tau_us: Option<f32>) {
+        self.deemphasis_alpha = tau_us.and_then(|tau| {
+            if tau <= 0.0 {
+                return None;
+            }
+            let dt = 1.0 / sample_rate_hz.max(1.0);
+            let tau_sec = tau * 1e-6;
+            Some(dt / (tau_sec + dt))
+        });
+        self.deemphasis_state = 0.0;
+    }
+
+    pub fn set_deemphasis_enabled(&mut self, enabled: bool) {
+        self.deemphasis_enabled = enabled;
+        self.deemphasis_state = 0.0;
+    }
+
+    pub fn reset_audio_state(&mut self) {
+        self.deemphasis_state = 0.0;
     }
 
     /// 複素IQサンプル列を受け取り、FM復調したMPX信号を output に書き込む。
@@ -38,7 +65,17 @@ impl FMDemodulator {
 
         for (i, &s) in input.iter().enumerate() {
             let d = self.prev.conj() * s;
-            output[i] = d.im.atan2(d.re) * self.gain;
+            let y = d.im.atan2(d.re) * self.gain;
+            output[i] = if self.deemphasis_enabled {
+                if let Some(alpha) = self.deemphasis_alpha {
+                    self.deemphasis_state += alpha * (y - self.deemphasis_state);
+                    self.deemphasis_state
+                } else {
+                    y
+                }
+            } else {
+                y
+            };
             self.prev = s;
         }
     }
@@ -56,6 +93,24 @@ mod tests {
                 Complex::new(phi.cos(), phi.sin())
             })
             .collect()
+    }
+
+    fn make_fm_modulated_iq(
+        audio_hz: f32,
+        deviation_hz: f32,
+        sample_rate: f32,
+        len: usize,
+    ) -> Vec<Complex<f32>> {
+        let mut phase = 0.0f32;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let t = i as f32 / sample_rate;
+            let m = (2.0 * std::f32::consts::PI * audio_hz * t).sin();
+            let inst_freq = deviation_hz * m;
+            phase += 2.0 * std::f32::consts::PI * inst_freq / sample_rate;
+            out.push(Complex::new(phase.cos(), phase.sin()));
+        }
+        out
     }
 
     fn demod_in_chunks(
@@ -175,6 +230,40 @@ mod tests {
             "FM negative deviation: expected={}, max_err={}",
             expected,
             max_err
+        );
+    }
+
+    #[test]
+    fn test_fm_deemphasis_toggle_changes_high_freq_level() {
+        let sample_rate = 200_000.0_f32;
+        let max_deviation = 75_000.0_f32;
+        let tone_hz = 12_000.0_f32;
+        let len = 16_384usize;
+        let input = make_fm_modulated_iq(tone_hz, 35_000.0, sample_rate, len);
+
+        let mut demod_raw = FMDemodulator::new(max_deviation, sample_rate);
+        let mut out_raw = vec![0.0f32; len];
+        demod_raw.demodulate(&input, &mut out_raw);
+
+        let mut demod_deemph = FMDemodulator::new(max_deviation, sample_rate);
+        demod_deemph.set_deemphasis_tau_us(sample_rate, Some(50.0));
+        demod_deemph.set_deemphasis_enabled(true);
+        let mut out_deemph = vec![0.0f32; len];
+        demod_deemph.demodulate(&input, &mut out_deemph);
+
+        let skip = 512usize;
+        let raw_rms = (out_raw[skip..].iter().map(|v| v * v).sum::<f32>()
+            / out_raw[skip..].len() as f32)
+            .sqrt();
+        let deemph_rms = (out_deemph[skip..].iter().map(|v| v * v).sum::<f32>()
+            / out_deemph[skip..].len() as f32)
+            .sqrt();
+
+        assert!(
+            deemph_rms < raw_rms * 0.8,
+            "deemphasis should attenuate high frequency: raw_rms={} deemph_rms={}",
+            raw_rms,
+            deemph_rms
         );
     }
 }

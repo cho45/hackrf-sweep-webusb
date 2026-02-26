@@ -114,6 +114,9 @@
             <input type="checkbox" v-model="dcCancelEnabled"> FFT DC Interpolate
           </label>
           <label class="checkbox">
+            <input type="checkbox" v-model="fmStereoEnabled"> FM Stereo
+          </label>
+          <label class="checkbox">
             <input type="checkbox" v-model="showDebugInfo"> Show Debug Info
           </label>
         </div>
@@ -181,6 +184,7 @@ type PersistedSettings = {
   spanHz: number;
   targetFreq: number;
   dcCancelEnabled: boolean;
+  fmStereoEnabled: boolean;
   showDebugInfo: boolean;
   ampEnabled: boolean;
   antennaEnabled: boolean;
@@ -193,6 +197,7 @@ const defaultSettings: PersistedSettings = {
   spanHz: 1_500_000,
   targetFreq: 1_025_000,
   dcCancelEnabled: true,
+  fmStereoEnabled: true,
   showDebugInfo: true,
   ampEnabled: false,
   antennaEnabled: false,
@@ -226,6 +231,7 @@ const loadSettings = (): PersistedSettings => {
         : (typeof parsed.viewBandwidthHz === 'number' ? parsed.viewBandwidthHz : defaultSettings.spanHz),
       targetFreq: getNumber('targetFreq'),
       dcCancelEnabled: getBoolean('dcCancelEnabled'),
+      fmStereoEnabled: getBoolean('fmStereoEnabled'),
       showDebugInfo: getBoolean('showDebugInfo'),
       ampEnabled: getBoolean('ampEnabled'),
       antennaEnabled: getBoolean('antennaEnabled'),
@@ -244,6 +250,7 @@ const spanHz = ref(loadedSettings.spanHz);
 const targetFreq = ref(loadedSettings.targetFreq);
 const rxSampleRate = ref(2_000_000);
 const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
+const fmStereoEnabled = ref(loadedSettings.fmStereoEnabled);
 const showDebugInfo = ref(loadedSettings.showDebugInfo);
 const demodMode = ref(loadedSettings.demodMode);
 const settingsOpen = ref(false);
@@ -478,6 +485,7 @@ const saveSettings = () => {
       spanHz: spanHz.value,
       targetFreq: targetFreq.value,
       dcCancelEnabled: dcCancelEnabled.value,
+      fmStereoEnabled: fmStereoEnabled.value,
       showDebugInfo: showDebugInfo.value,
       ampEnabled: options.ampEnabled,
       antennaEnabled: options.antennaEnabled,
@@ -791,6 +799,7 @@ const start = async () => {
       ifMinHz: ifMinHz.value,
       ifMaxHz: ifMaxHz.value,
       dcCancelEnabled: dcCancelEnabled.value,
+      fmStereoEnabled: fmStereoEnabled.value,
       ampEnabled: options.ampEnabled,
       antennaEnabled: options.antennaEnabled,
       lnaGain: options.lnaGain,
@@ -845,11 +854,15 @@ watch(() => options.antennaEnabled, (val) => { if (connected.value) backend.setA
 watch(() => dcCancelEnabled.value, (val) => {
   if (connected.value && running.value) backend.setDcCancelEnabled(val);
 });
+watch(() => fmStereoEnabled.value, (val) => {
+  if (connected.value && running.value) backend.setFmStereoEnabled(val);
+});
 watch(
   [
     spanHz,
     targetFreq,
     dcCancelEnabled,
+    fmStereoEnabled,
     showDebugInfo,
     demodMode,
     () => options.ampEnabled,
