@@ -1,121 +1,164 @@
 # Radio SDR (HackRF WebUSB)
 
-HackRF を WebUSB 経由で制御し、ブラウザ上で復調とスペクトログラム（ウォーターフォール）表示を行う SDR (Software Defined Radio) アプリケーションです。
+HackRF One を WebUSB 経由で制御し、ブラウザ上で
 
-## アーキテクチャ
+- ウォーターフォール/FFT 表示
+- AM / FM 復調
+- オーディオ再生
 
-* **Frontend**: Vite + Vue 3 + TypeScript
-  * UI、HackRF の WebUSB 制御、`AudioContext` と `AudioWorkletNode` を用いた音声再生、Canvas (`WaterfallGL`) を用いたスペクトログラム表示。
-  * `worker.ts`: WebWorker と Comlink を用い、HackRF の制御と DSP (Wasm) 処理をメインスレッドから分離。
-* **Backend (DSP)**: Rust + WebAssembly (`hackrf-dsp`)
-  * `wasm-bindgen` を用いた Wasm モジュール。
-  * `rustfft` を用いたスペクトル解析。
+を行う SDR アプリケーションです。
 
-## DSP パイプライン
+## 現在の入力パラメータ
 
-受信 IQ データは**表示パス**と**復調パス**の2系統に分かれて処理される。
-表示パスは `rxSampleRate`（viewBandwidth に応じて変動）で決まり、復調パスは
-モードごとに固定された `demod_rate` で動作する。
+UI で主に入力するのは次の2つです。
 
-```
-HackRF IQ @ rxSampleRate (viewBandwidth で決定, 2〜20 MHz)
-    │
-    ├── [表示パス]
-    │     DC Cancel → FFT → Waterfall / Spectrum
-    │     rxSampleRate のまま処理。復調とは独立。
-    │
-    └── [復調パス]
-          DC Cancel
-            │
-          NCO  (rxSampleRate で複素乗算)
-            │  target → DC へシフト
-            │
-          チャンネルフィルタ + デシメーション  (DecimationFilter)
-            │  rxSampleRate → demod_rate
-            │  factor = rxSampleRate / demod_rate
-            │  FIR タップ数: factor に応じて算出
-            │  カットオフ: モード別チャンネル帯域幅
-            │
-          復調  (AM 包絡線検波 / FM 位相差分)
-            │  demod_rate のリアル信号を出力
-            │
-          Resampler (polyphase FIR)
-            │  demod_rate → audioCtx.sampleRate (e.g. 48 kHz)
-            │  taps_per_phase を step に応じて動的算出
-            │  AM: step≈1.04 → 17 taps, WFM: step≈4.2 → ~85 taps
-            │
-          Audio 出力
-```
+- `Target Frequency`（復調対象周波数）
+- `Span`（表示帯域幅）
 
-### モード別パラメータ
+`IF offset` と `IF band` は自動設定です。
 
-| モード | demod_rate | チャンネル帯域幅 |
-|--------|-----------|----------------|
-| AM     | 50 kHz    | 0〜4.5 kHz     |
-| WFM    | 200 kHz   | 0〜100 kHz     |
+## サンプルレート設計
 
-### 設計上の要点
+`rxSampleRate` は `Span` のみを基準に、次の離散候補から最小値を選びます。
 
-1. **表示と復調の分離**: `rxSampleRate` は表示帯域に応じて変動するが、
-   復調パスの計算量は `demod_rate × FIR タップ数` で決まり、
-   `rxSampleRate` に依存しない。
-2. **Resampler の入力レートの統一**: 全モードで Resampler の入力を
-   ~50 kHz に揃えることで、Resampler の step が常に ~1.0 となり、
-   17 タップの polyphase FIR で十分なアンチエイリアシングが得られる。
-3. **FIR タップ数の適正化**: デシメーション比（factor）に応じて
-   タップ数を算出する。固定 601 タップではなく、チャンネル帯域と
-   遷移帯域幅から理論的に必要なタップ数を決定する。
+- `2 / 4 / 8 / 10 / 20 Msps`
 
-## 開発環境のセットアップ
+選択ルール:
 
-Node.js と Rust (cargo) が必要です。
+- `rxSampleRate = min(candidate where candidate >= span)`
+- `Span` の最大は `20 MHz`
 
-### 1. DSPモジュール (Rust/Wasm) のビルド
+例:
 
-Wasmモジュールのビルドには `wasm-pack` および `cargo-make` を使用しています。
+| Span | 選択される rxSampleRate |
+| --- | --- |
+| 1.5 MHz | 2 Msps |
+| 6 MHz | 8 Msps |
+| 10 MHz | 10 Msps |
+| 12 MHz | 20 Msps |
 
-```sh
-cd radio/hackrf-dsp
-cargo make build
-```
+## IF offset と中心周波数
 
-コンパイルが成功すると、`radio/hackrf-dsp/pkg/` に Wasm モジュールと JS バインディングが生成されます。
+- IF offset は固定 `+250 kHz`
+- `RF Center = Target + 250 kHz`（下限 1 MHz）
+- 目的は DC 近傍の影響回避
 
-### 2. DSPモジュールのテスト実行
+表示中心は `Target`、実チューニング中心は `RF Center` です。
 
-```sh
-cd radio/hackrf-dsp
-cargo make test
-```
+## DSP パイプライン（WASM）
 
-### 3. フロントエンドの依存関係インストールと起動
+現在の復調パスは 2 段デシメーションです。
+
+1. 入力 IQ (`i8`, `rxSampleRate`)
+2. DC cancel + NCO ミキシング
+3. 粗段デシメーション（boxcar）: `rxSampleRate -> 1 Msps`
+4. 復調段デシメーション（FIR band-pass）
+   - AM: `1 MHz -> 50 kHz` (`/20`)
+   - FM: `1 MHz -> 200 kHz` (`/5`)
+5. 復調
+   - AM: 包絡線 + AGC
+   - FM: 位相差分
+6. Resampler: `demod_rate -> audioCtx.sampleRate`
+7. Audio 出力
+
+FFT 表示パス:
+
+- 入力 IQ（または処理済み IQ）から FFT
+- 可視ビンのみ切り出して表示
+
+## JS/WASM 境界（低レベル I/O API）
+
+ホットパスの割り当てを減らすため、`Receiver` は低レベル API を持ちます。
+
+- `alloc_io_buffers(maxIqBytes, maxAudioSamples, maxFftBins)`
+- `iq_input_ptr() / audio_output_ptr() / fft_output_ptr()`
+- `process_iq_len(iqLen) -> audioLen`
+- `free_io_buffers()`
+
+Worker は起動時に一度だけ I/O バッファを確保し、各ブロックで
+
+1. IQ を入力バッファへコピー
+2. `process_iq_len()` 呼び出し
+3. 出力バッファから Audio/FFT を読む
+
+という流れで処理します。
+
+### エラーハンドリング方針
+
+- Rust 側: 受け入れ不可サイズは即エラー（暗黙切り詰めしない）
+- JS 側: そのブロックをスキップし、`dropped IQ blocks` 統計へ加算して継続
+
+## パフォーマンス表示（UI）
+
+`DSP`:
+
+- `blocks/s`
+- `process ms(avg/max)`
+- `cb ms(avg/max)`
+- `IQ MB/s`
+- `dropped IQ blocks`
+
+`Draw`:
+
+- `fps`
+- `draw ms(avg/max)`
+
+`Audio`:
+
+- `buffer`
+- `queue / underrun`
+- `dropped samples`
+
+## 開発
+
+前提:
+
+- Node.js（v22 系を想定）
+- Rust / cargo
+- wasm-pack
+
+### 依存インストール
 
 ```sh
 cd radio
 npm install
+```
+
+### WASM ビルド
+
+```sh
+cd radio
+npm run build:wasm
+```
+
+### フロント開発サーバ
+
+```sh
+cd radio
 npm run dev
 ```
 
-起動後、ブラウザで指定されたローカルURL（通常 `http://localhost:5173/`）にアクセスしてください。
+### テスト
 
-## 配布用ビルド
+```sh
+cd radio
+npm test
+cd hackrf-dsp && cargo test
+```
 
-全体の TypeScript コンパイルエラーチェックと、Vite による本番用ビルドを行います。
+### 本番ビルド
 
 ```sh
 cd radio
 npm run build
 ```
 
-成功すると `dist/` ディレクトリに配布用の静的ファイルが生成されます。
+### DSP ベンチ（ネイティブ）
 
-## 使用方法
-
-1. HackRF を USB で PC に接続します。
-2. アプリケーション画面の `Connect` ボタンをクリックします。
-3. ブラウザの USBデバイス選択ダイアログで `HackRF` を選択します。
-4. `Start Rx` をクリックすると受信が開始され、設定した Target Frequency の復調音声が再生され、ウォーターフォールが表示されます。
-5. Frequency や Gain はUI上から動的に変更可能です。
+```sh
+cd radio/hackrf-dsp
+cargo run --release --bin bench_pipeline
+```
 
 ## ライセンス
 
