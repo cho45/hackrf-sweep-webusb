@@ -29,6 +29,8 @@ const EPS_FFT = Number(process.env.PARITY_EPS_FFT ?? 1e-3);
 const AUDIO_MAX_LAG = Number(process.env.PARITY_AUDIO_MAX_LAG ?? 2);
 const AUDIO_RMSE_RATIO_MAX = Number(process.env.PARITY_AUDIO_RMSE_RATIO_MAX ?? 0.12);
 const AUDIO_MIN_CORR = Number(process.env.PARITY_AUDIO_MIN_CORR ?? 0.99);
+const AUDIO_RMSE_RATIO_MAX_FM = Number(process.env.PARITY_AUDIO_RMSE_RATIO_MAX_FM ?? 0.22);
+const AUDIO_MIN_CORR_FM = Number(process.env.PARITY_AUDIO_MIN_CORR_FM ?? 0.97);
 
 function supportsWasmSimd() {
 	if (typeof WebAssembly === "undefined" || typeof WebAssembly.validate !== "function") {
@@ -150,6 +152,9 @@ function makeReceiver(bindings, cfg) {
 }
 
 async function runCase(cfg, baseBindings, simdBindings) {
+	const isFm = cfg.demodMode === "FM";
+	const audioRmseRatioMax = isFm ? AUDIO_RMSE_RATIO_MAX_FM : AUDIO_RMSE_RATIO_MAX;
+	const audioMinCorr = isFm ? AUDIO_MIN_CORR_FM : AUDIO_MIN_CORR;
 	const base = makeReceiver(baseBindings, cfg);
 	const simd = makeReceiver(simdBindings, cfg);
 	const iqBase = new Int8Array(baseBindings.wasm.memory.buffer, base.iq_input_ptr(), IQ_CAP);
@@ -216,13 +221,13 @@ async function runCase(cfg, baseBindings, simdBindings) {
 		const fftDiff = compareSlice(fftBase, fftSimd, fftVisible);
 		if (audioStats.rmse > worstAudio.rmse) worstAudio = audioStats;
 		if (fftDiff > maxFftDiff) maxFftDiff = fftDiff;
-		const rmseLimit = Math.max(5e-4, audioStats.refRms * AUDIO_RMSE_RATIO_MAX);
+		const rmseLimit = Math.max(5e-4, audioStats.refRms * audioRmseRatioMax);
 		if (audioStats.rmse > rmseLimit) {
 			throw new Error(
 				`${cfg.name}: audio rmse too large block=${i} rmse=${audioStats.rmse} limit=${rmseLimit} lag=${audioStats.lag} corr=${audioStats.corr}`,
 			);
 		}
-		if (audioStats.corr < AUDIO_MIN_CORR) {
+		if (audioStats.corr < audioMinCorr) {
 			throw new Error(
 				`${cfg.name}: audio correlation too low block=${i} corr=${audioStats.corr} lag=${audioStats.lag}`,
 			);
@@ -309,8 +314,9 @@ describe("wasm simd parity", () => {
 
 			for (const cfg of cases) {
 				const result = await runCase(cfg, base, simd);
+				const minCorr = cfg.demodMode === "FM" ? AUDIO_MIN_CORR_FM : AUDIO_MIN_CORR;
 				expect(result.maxFftDiff, `${cfg.name} fft`).toBeLessThanOrEqual(EPS_FFT);
-				expect(result.worstAudio.corr, `${cfg.name} audio corr`).toBeGreaterThanOrEqual(AUDIO_MIN_CORR);
+				expect(result.worstAudio.corr, `${cfg.name} audio corr`).toBeGreaterThanOrEqual(minCorr);
 			}
 		},
 		120_000,

@@ -3,12 +3,12 @@
     <div class="actions">
       <div style="margin-bottom: 20px;">
         <template v-if="!connected">
-          <button class="btn btn-primary" v-on:click="connect">Connect</button>
+          <button class="btn btn-primary" :disabled="rxTransitioning" v-on:click="connect">Connect</button>
         </template>
         <template v-else>
-          <button class="btn btn-primary" v-on:click="start" v-if="!running">Start Rx</button>
-          <button class="btn btn-secondary" v-on:click="stop" v-if="running">Stop Rx</button>
-          <button class="btn" v-on:click="disconnect">Disconnect</button>
+          <button class="btn btn-primary" :disabled="rxTransitioning" v-on:click="start" v-if="!running">Start Rx</button>
+          <button class="btn btn-secondary" :disabled="rxTransitioning" v-on:click="stop" v-if="running">Stop Rx</button>
+          <button class="btn" :disabled="rxTransitioning" v-on:click="disconnect">Disconnect</button>
         </template>
       </div>
 
@@ -147,6 +147,7 @@ const WorkerBackend = Comlink.wrap<any>(new Worker(new URL('./worker.ts', import
 
 const connected = ref(false);
 const running = ref(false);
+const rxTransitioning = ref(false);
 const snackbar = reactive({ show: false, message: '' });
 
 // HackRF Info
@@ -376,7 +377,7 @@ const normalizeTuning = () => {
 };
 
 const restartRx = async () => {
-  if (!running.value) return;
+  if (!running.value || rxTransitioning.value) return;
   await stop();
   await start();
 };
@@ -506,6 +507,7 @@ const connect = async () => {
 };
 
 const disconnect = async () => {
+  if (rxTransitioning.value) return;
   if (backend) {
     if (running.value) await stop();
     await backend.close();
@@ -638,24 +640,26 @@ const startRenderLoop = (
 };
 
 const start = async () => {
-  if (!connected.value) return;
+  if (!connected.value || running.value || rxTransitioning.value) return;
+  rxTransitioning.value = true;
 
-  normalizeTuning();
-  await initAudio();
+  try {
+    normalizeTuning();
+    await initAudio();
 
-  if (!fftCanvas.value || !waterfallCanvas.value) {
-    console.error("Canvas elements not found.");
-    return;
-  }
+    if (!fftCanvas.value || !waterfallCanvas.value) {
+      console.error("Canvas elements not found.");
+      return;
+    }
 
-  const canvasFft = fftCanvas.value;
-  const canvasWf = waterfallCanvas.value;
-  const canvasFftCtx = canvasFft.getContext('2d');
+    const canvasFft = fftCanvas.value;
+    const canvasWf = waterfallCanvas.value;
+    const canvasFftCtx = canvasFft.getContext('2d');
 
-  if (!canvasFftCtx) {
-    console.error("FFT Canvas 2D context not available.");
-    return;
-  }
+    if (!canvasFftCtx) {
+      console.error("FFT Canvas 2D context not available.");
+      return;
+    }
 
   // FFTサイズはキャンバスの幅を元に、次数の大きい直近の「2のべき乗」に合わせる
   const freqBinCount0 = canvasFft.offsetWidth * window.devicePixelRatio;
@@ -663,71 +667,91 @@ const start = async () => {
   if (fftSizeFull < 256) fftSizeFull = 256;
   if (fftSizeFull > 8192) fftSizeFull = 8192;
 
-  const fftViewWindow = computeFftViewWindow(fftSizeFull);
-  const fftVisibleBins = fftViewWindow.bins;
+    const fftViewWindow = computeFftViewWindow(fftSizeFull);
+    const fftVisibleBins = fftViewWindow.bins;
 
   // キャンバスの内部解像度を FFT の bin 数に合わせる
-  canvasFft.width = fftVisibleBins;
-  canvasFft.height = 200;
+    canvasFft.width = fftVisibleBins;
+    canvasFft.height = 200;
 
-  const maxTextureSize = 16384; // Typical max texture size for WebGL
-  const useWebGL = fftVisibleBins <= maxTextureSize;
+    const maxTextureSize = 16384; // Typical max texture size for WebGL
+    const useWebGL = fftVisibleBins <= maxTextureSize;
 
-  waterfall = useWebGL ?
-    new WaterfallGL(canvasWf, fftVisibleBins, 256) :
-    new Waterfall(canvasWf, fftVisibleBins, 256);
-  startRenderLoop(canvasFftCtx, canvasFft);
+    waterfall = useWebGL ?
+      new WaterfallGL(canvasWf, fftVisibleBins, 256) :
+      new Waterfall(canvasWf, fftVisibleBins, 256);
+    startRenderLoop(canvasFftCtx, canvasFft);
 
-  const channel = new MessageChannel();
-  audioNode!.port.postMessage({ type: 'attach-input-port', port: channel.port1 }, [channel.port1]);
-  await backend.setAudioPort(Comlink.transfer(channel.port2, [channel.port2]));
+    const channel = new MessageChannel();
+    audioNode!.port.postMessage({ type: 'attach-input-port', port: channel.port1 }, [channel.port1]);
+    await backend.setAudioPort(Comlink.transfer(channel.port2, [channel.port2]));
 
   // Comlinkのコールバック関数は proxy に包む必要がある
-  const onData = Comlink.proxy((fftOut: Float32Array, perf?: DspPerfStats) => {
-    if (!latestFftFrame || latestFftFrame.length !== fftOut.length) {
-      latestFftFrame = new Float32Array(fftOut.length);
-    }
-    latestFftFrame.set(fftOut);
-    if (perf) {
-      dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
-      dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
-      dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
-      dspPerf.audioOutHzLong = perf.audioOutHzLong;
-      dspPerf.pilotLevel = perf.pilotLevel;
-      dspPerf.stereoBlend = perf.stereoBlend;
-      dspPerf.stereoLocked = perf.stereoLocked;
-      dspPerf.monoFallbackCount = perf.monoFallbackCount;
-    }
-  });
+    const onData = Comlink.proxy((fftOut: Float32Array, perf?: DspPerfStats) => {
+      if (!latestFftFrame || latestFftFrame.length !== fftOut.length) {
+        latestFftFrame = new Float32Array(fftOut.length);
+      }
+      latestFftFrame.set(fftOut);
+      if (perf) {
+        dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
+        dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
+        dspPerf.dspProcessMsPeak = perf.dspProcessMsPeak;
+        dspPerf.audioOutHzLong = perf.audioOutHzLong;
+        dspPerf.pilotLevel = perf.pilotLevel;
+        dspPerf.stereoBlend = perf.stereoBlend;
+        dspPerf.stereoLocked = perf.stereoLocked;
+        dspPerf.monoFallbackCount = perf.monoFallbackCount;
+      }
+    });
 
-  await backend.startRx({
-    sampleRate: rxSampleRate.value,
-    centerFreq: rfCenterFreq.value,
-    targetFreq: targetFreq.value,
-    demodMode: demodMode.value,
-    outputSampleRate: audioCtx!.sampleRate,
-    fftSize: fftSizeFull,
-    fftVisibleStartBin: fftViewWindow.startBin,
-    fftVisibleBins,
-    ifMinHz: ifMinHz.value,
-    ifMaxHz: ifMaxHz.value,
-    dcCancelEnabled: dcCancelEnabled.value,
-    ampEnabled: options.ampEnabled,
-    antennaEnabled: options.antennaEnabled,
-    lnaGain: options.lnaGain,
-    vgaGain: options.vgaGain,
-  }, onData);
+    await backend.startRx({
+      sampleRate: rxSampleRate.value,
+      centerFreq: rfCenterFreq.value,
+      targetFreq: targetFreq.value,
+      demodMode: demodMode.value,
+      outputSampleRate: audioCtx!.sampleRate,
+      fftSize: fftSizeFull,
+      fftVisibleStartBin: fftViewWindow.startBin,
+      fftVisibleBins,
+      ifMinHz: ifMinHz.value,
+      ifMaxHz: ifMaxHz.value,
+      dcCancelEnabled: dcCancelEnabled.value,
+      ampEnabled: options.ampEnabled,
+      antennaEnabled: options.antennaEnabled,
+      lnaGain: options.lnaGain,
+      vgaGain: options.vgaGain,
+    }, onData);
 
-  running.value = true;
+    running.value = true;
+  } catch (e: any) {
+    stopRenderLoop();
+    stopAudio();
+    if (backend) {
+      try {
+        await backend.stopRx();
+      } catch (_e) {
+        // no-op
+      }
+    }
+    showSnackbar("Start Rx Error: " + (e?.message ?? String(e)));
+  } finally {
+    rxTransitioning.value = false;
+  }
 };
 
 const stop = async () => {
-  if (backend) {
-    await backend.stopRx();
+  if (!running.value || rxTransitioning.value) return;
+  rxTransitioning.value = true;
+  try {
+    if (backend) {
+      await backend.stopRx();
+    }
+  } finally {
+    stopRenderLoop();
+    stopAudio();
+    running.value = false;
+    rxTransitioning.value = false;
   }
-  stopRenderLoop();
-  stopAudio();
-  running.value = false;
 };
 
 // オプションの監視

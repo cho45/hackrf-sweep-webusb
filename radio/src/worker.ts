@@ -400,6 +400,8 @@ export class RadioBackend {
 				droppedIqBlocksCount += 1;
 				return;
 			}
+			// process中にWasmメモリが再配置される場合があるため再取得する
+			ensureViews();
 			const processMs = performance.now() - processStart;
 			if (processMs > dspProcessMsPeak) {
 				dspProcessMsPeak = processMs;

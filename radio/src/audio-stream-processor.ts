@@ -1,3 +1,15 @@
+/// <reference lib="webworker" />
+
+declare abstract class AudioWorkletProcessor {
+  readonly port: MessagePort;
+  constructor(options?: unknown);
+  process(
+    inputs: Float32Array[][],
+    outputs: Float32Array[][],
+    parameters: Record<string, Float32Array>,
+  ): boolean;
+}
+
 type QueueChunk = {
   data: Float32Array;
   channels: 1 | 2;
