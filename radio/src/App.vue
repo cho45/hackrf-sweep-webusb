@@ -271,6 +271,11 @@ const waterfallCanvas = ref<HTMLCanvasElement | null>(null);
 const fftCanvas = ref<HTMLCanvasElement | null>(null);
 
 let waterfall: WaterfallGL | Waterfall | null = null;
+let latestFftFrame: Float32Array | null = null;
+let renderLoopId: number | null = null;
+let renderLastTimeMs = 0;
+const waterfallFps = 30;
+const waterfallFrameIntervalMs = 1000 / waterfallFps;
 
 const showSnackbar = (msg: string) => {
   snackbar.message = msg;
@@ -484,6 +489,71 @@ const stopAudio = () => {
   }
 };
 
+const stopRenderLoop = () => {
+  if (renderLoopId !== null) {
+    cancelAnimationFrame(renderLoopId);
+    renderLoopId = null;
+  }
+  renderLastTimeMs = 0;
+  latestFftFrame = null;
+};
+
+const drawFftAndWaterfall = (
+  canvasFftCtx: CanvasRenderingContext2D,
+  canvasFft: HTMLCanvasElement,
+  fftOut: Float32Array
+) => {
+  if (waterfall) {
+    waterfall.renderLine(fftOut);
+  }
+
+  canvasFftCtx.clearRect(0, 0, canvasFft.width, canvasFft.height);
+  canvasFftCtx.save();
+  canvasFftCtx.beginPath();
+  canvasFftCtx.moveTo(0, canvasFft.height);
+  for (let i = 0; i < fftOut.length; i++) {
+    const val = fftOut[i] !== undefined ? fftOut[i]! : -120;
+    const n = (val + 45) / 42; // Adjust for visualization range
+    canvasFftCtx.lineTo(i, canvasFft.height - canvasFft.height * n);
+  }
+  canvasFftCtx.strokeStyle = "#fff";
+  canvasFftCtx.stroke();
+
+  // targetFreq (NCOオフセット位置) に赤い線を引く
+  const targetHz = targetFreq.value;
+  const startHz = displayMinFreq.value;
+  const widthHz = spanHz.value;
+
+  const ratio = Math.min(1, Math.max(0, (targetHz - startHz) / widthHz));
+  const x = canvasFft.width * ratio;
+
+  canvasFftCtx.beginPath();
+  canvasFftCtx.moveTo(x, 0);
+  canvasFftCtx.lineTo(x, canvasFft.height);
+  canvasFftCtx.strokeStyle = "rgba(255, 0, 0, 0.8)";
+  canvasFftCtx.lineWidth = 1;
+  canvasFftCtx.stroke();
+
+  canvasFftCtx.restore();
+};
+
+const startRenderLoop = (
+  canvasFftCtx: CanvasRenderingContext2D,
+  canvasFft: HTMLCanvasElement
+) => {
+  stopRenderLoop();
+  const tick = (timeMs: number) => {
+    renderLoopId = requestAnimationFrame(tick);
+
+    if (timeMs - renderLastTimeMs < waterfallFrameIntervalMs) return;
+    renderLastTimeMs = timeMs;
+
+    if (!latestFftFrame) return;
+    drawFftAndWaterfall(canvasFftCtx, canvasFft, latestFftFrame);
+  };
+  renderLoopId = requestAnimationFrame(tick);
+};
+
 const start = async () => {
   if (!connected.value) return;
 
@@ -523,43 +593,13 @@ const start = async () => {
   waterfall = useWebGL ?
     new WaterfallGL(canvasWf, fftVisibleBins, 256) :
     new Waterfall(canvasWf, fftVisibleBins, 256);
+  startRenderLoop(canvasFftCtx, canvasFft);
 
   // Comlinkのコールバック関数は proxy に包む必要がある
   const onData = Comlink.proxy((audioOut: Float32Array, fftOut: Float32Array) => {
     playAudioBuffer(audioOut);
-    if (waterfall) {
-      waterfall.renderLine(fftOut);
-
-      // FFT表示
-      canvasFftCtx.clearRect(0, 0, canvasFft.width, canvasFft.height);
-      canvasFftCtx.save();
-      canvasFftCtx.beginPath();
-      canvasFftCtx.moveTo(0, canvasFft.height);
-      for (let i = 0; i < fftOut.length; i++) {
-        const val = fftOut[i] !== undefined ? fftOut[i]! : -120;
-        const n = (val + 45) / 42; // Adjust for visualization range
-        canvasFftCtx.lineTo(i, canvasFft.height - canvasFft.height * n);
-      }
-      canvasFftCtx.strokeStyle = "#fff";
-      canvasFftCtx.stroke();
-
-      // targetFreq (NCOオフセット位置) に赤い線を引く
-      const targetHz = targetFreq.value;
-      const startHz = displayMinFreq.value;
-      const widthHz = spanHz.value;
-      
-      const ratio = Math.min(1, Math.max(0, (targetHz - startHz) / widthHz));
-      const x = canvasFft.width * ratio;
-
-      canvasFftCtx.beginPath();
-      canvasFftCtx.moveTo(x, 0);
-      canvasFftCtx.lineTo(x, canvasFft.height);
-      canvasFftCtx.strokeStyle = "rgba(255, 0, 0, 0.8)";
-      canvasFftCtx.lineWidth = 1;
-      canvasFftCtx.stroke();
-
-      canvasFftCtx.restore();
-    }
+    // Wasm側バッファ再利用の影響を避けるためコピーして保持する
+    latestFftFrame = new Float32Array(fftOut);
   });
 
   await backend.startRx({
@@ -588,6 +628,7 @@ const stop = async () => {
   if (backend) {
     await backend.stopRx();
   }
+  stopRenderLoop();
   stopAudio();
   running.value = false;
 };
