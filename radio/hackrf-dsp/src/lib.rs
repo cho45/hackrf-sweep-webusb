@@ -28,6 +28,9 @@ const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
 /// モード別の復調レート [Hz]
 const AM_DEMOD_RATE: f32 = 50_000.0;
 const FM_DEMOD_RATE: f32 = 200_000.0;
+const AM_AUDIO_CUTOFF_HZ: f32 = 5_000.0;
+const FM_AUDIO_CUTOFF_HZ: f32 = 15_000.0;
+const FM_DEEMPHASIS_TAU_US: f32 = 50.0;
 const COARSE_STAGE_RATE: f32 = 1_000_000.0;
 const FFT_DC_INTERP_HALF_WIDTH: usize = 2;
 
@@ -253,9 +256,15 @@ impl Receiver {
             if_max_hz
         ));
 
-        let resampler = Resampler::new(
+        let audio_cutoff_hz = match mode {
+            DemodMode::Am => AM_AUDIO_CUTOFF_HZ,
+            DemodMode::Fm => FM_AUDIO_CUTOFF_HZ,
+        };
+
+        let resampler = Resampler::new_with_cutoff(
             plan.demod_sample_rate.round() as u32,
             output_sample_rate.round() as u32,
+            Some(audio_cutoff_hz),
         );
 
         // FFT窓関数 (Hann窓)
@@ -313,7 +322,11 @@ impl Receiver {
                 f
             },
             am_demod: AMDemodulator::new(),
-            fm_demod: FMDemodulator::new(FM_MAX_DEVIATION_HZ, plan.demod_sample_rate),
+            fm_demod: FMDemodulator::new_with_deemphasis(
+                FM_MAX_DEVIATION_HZ,
+                plan.demod_sample_rate,
+                Some(FM_DEEMPHASIS_TAU_US),
+            ),
             resampler,
             fft: FFT::new(fft_size, &window),
             baseband_buffer: Vec::with_capacity(131_072),

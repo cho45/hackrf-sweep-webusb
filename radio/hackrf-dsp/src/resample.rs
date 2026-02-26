@@ -11,7 +11,9 @@ pub struct Resampler {
 }
 
 impl Resampler {
-    pub fn new(source_rate: u32, target_rate: u32) -> Self {
+    /// `cutoff_hz` を指定した場合、リサンプラ内LPFのカットオフを明示できる。
+    /// 指定しない場合は従来どおり target_rate ベースの自動値を使う。
+    pub fn new_with_cutoff(source_rate: u32, target_rate: u32, cutoff_hz: Option<f32>) -> Self {
         assert!(source_rate > 0, "source_rate must be > 0");
         assert!(target_rate > 0, "target_rate must be > 0");
 
@@ -27,7 +29,16 @@ impl Resampler {
         let mut coeffs = vec![vec![0.0; taps_per_phase]; num_phases];
 
         // source 側正規化周波数（Nyquist=0.5）
-        let cutoff = 0.5f64 * (target_rate as f64 / source_rate as f64).min(1.0) * 0.95;
+        // - 指定なし: target_rate に合わせた従来値
+        // - 指定あり: min(source/2, target/2, cutoff_hz) にクランプして利用
+        let default_cutoff_hz = 0.5f64 * target_rate as f64 * 0.95;
+        let max_cutoff_hz = 0.49f64 * (source_rate.min(target_rate) as f64);
+        let cutoff_hz = cutoff_hz
+            .map(|v| v as f64)
+            .unwrap_or(default_cutoff_hz)
+            .min(max_cutoff_hz)
+            .max(1.0);
+        let cutoff = cutoff_hz / source_rate as f64;
         let center = (taps_per_phase - 1) as f64 / 2.0;
 
         for (p, phase_coeffs) in coeffs.iter_mut().enumerate() {
@@ -176,7 +187,7 @@ mod tests {
         }
 
         // リサンプラに通す
-        let mut resampler = Resampler::new(source_rate, target_rate);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
         let mut output = Vec::new();
         resampler.process(&input, &mut output);
 
@@ -218,8 +229,8 @@ mod tests {
         // 連続的にバッファを渡した場合に、履歴(history)と位相が正しく接続されるかを検証
         let source_rate = 10_000;
         let target_rate = 8_000;
-        let mut resampler_chunks = Resampler::new(source_rate, target_rate);
-        let mut resampler_whole = Resampler::new(source_rate, target_rate);
+        let mut resampler_chunks = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut resampler_whole = Resampler::new_with_cutoff(source_rate, target_rate, None);
 
         let input: Vec<f32> = (0..4_000)
             .map(|i| {
@@ -267,7 +278,7 @@ mod tests {
         // 十分に減衰されることを確認する。
         let source_rate = 200_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new(source_rate, target_rate);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
 
         // 30kHz (ナイキスト超) の正弦波を入力
         let len = 50_000;
@@ -301,7 +312,7 @@ mod tests {
     fn test_long_run_output_count_tracks_ratio_50k_to_48k() {
         let source_rate = 50_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new(source_rate, target_rate);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
 
         let total_input = 500_000usize; // 10秒相当
         let input: Vec<f32> = (0..total_input)
@@ -343,7 +354,7 @@ mod tests {
     fn test_long_run_output_count_tracks_ratio_200k_to_48k() {
         let source_rate = 200_000u32;
         let target_rate = 48_000u32;
-        let mut resampler = Resampler::new(source_rate, target_rate);
+        let mut resampler = Resampler::new_with_cutoff(source_rate, target_rate, None);
 
         let total_input = 2_000_000usize; // 10秒相当
         let input: Vec<f32> = (0..total_input)
@@ -377,6 +388,50 @@ mod tests {
             expected,
             err,
             tolerance
+        );
+    }
+
+    #[test]
+    fn test_custom_cutoff_reduces_high_audio_band() {
+        let source_rate = 50_000u32;
+        let target_rate = 48_000u32;
+        let tone_hz = 10_000.0f32;
+        let len = 120_000usize;
+
+        let input: Vec<f32> = (0..len)
+            .map(|i| {
+                let t = i as f32 / source_rate as f32;
+                (2.0 * PI * tone_hz * t).sin()
+            })
+            .collect();
+
+        let mut default_rs = Resampler::new_with_cutoff(source_rate, target_rate, None);
+        let mut low_cut_rs = Resampler::new_with_cutoff(source_rate, target_rate, Some(5_000.0));
+        let mut out_default = Vec::new();
+        let mut out_low_cut = Vec::new();
+        default_rs.process(&input, &mut out_default);
+        low_cut_rs.process(&input, &mut out_low_cut);
+
+        let skip_default = out_default.len().min(2_000);
+        let skip_low = out_low_cut.len().min(2_000);
+        let rms_default = (out_default[skip_default..]
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            / (out_default.len() - skip_default).max(1) as f32)
+            .sqrt();
+        let rms_low_cut = (out_low_cut[skip_low..]
+            .iter()
+            .map(|v| v * v)
+            .sum::<f32>()
+            / (out_low_cut.len() - skip_low).max(1) as f32)
+            .sqrt();
+
+        assert!(
+            rms_low_cut < rms_default * 0.3,
+            "Custom cutoff did not attenuate high tone enough: default_rms={} low_cut_rms={}",
+            rms_default,
+            rms_low_cut
         );
     }
 }
