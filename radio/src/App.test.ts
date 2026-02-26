@@ -109,14 +109,15 @@ describe('App.vue', () => {
 
 	it('has initial disconnected state', () => {
 		const wrapper = mount(App);
-		const connectBtn = wrapper.findAll('button').find(b => b.text() === 'Connect');
-		const disconnectBtn = wrapper.findAll('button').find(b => b.text() === 'Disconnect');
 		const startBtn = wrapper.findAll('button').find(b => b.text() === 'Start Rx');
+		const settingsBtn = wrapper.findAll('button').find(b => b.text() === 'Settings');
+		const disconnectBtn = wrapper.findAll('button').find(b => b.text() === 'Disconnect');
 
-		expect(connectBtn).toBeDefined();
-		expect(connectBtn!.attributes('disabled')).toBeUndefined();
-		expect(disconnectBtn).toBeUndefined();
-		expect(startBtn).toBeUndefined();
+		expect(startBtn).toBeDefined();
+		expect(startBtn!.attributes('disabled')).toBeUndefined();
+		expect(settingsBtn).toBeDefined();
+		expect(disconnectBtn).toBeDefined();
+		expect(disconnectBtn!.attributes('disabled')).toBeDefined();
 	});
 
 	it('should call navigator.usb.requestDevice and pass ids to backend on connect', async () => {
@@ -129,18 +130,13 @@ describe('App.vue', () => {
 
 		const wrapper = mount(App);
 
-		// backend を強引にモック (setup()のインスタンス変数としては取れないため)
-		// Appコンポーネントのテストとして「requestDevice がクリック時に呼ばれるか」を主要な検証とする
-		const connectBtn = wrapper.findAll('button').find(b => b.text() === 'Connect');
-		expect(connectBtn).toBeDefined();
+		// Start Rx で未接続時に接続フローへ入ることを確認する
+		const startBtn = wrapper.findAll('button').find(b => b.text() === 'Start Rx');
+		expect(startBtn).toBeDefined();
 
-		// Vue の nextTick とイベントループを回して Promiseチェーン(backend.open())を解決させる
-		await connectBtn!.trigger('click');
+		await startBtn!.trigger('click');
 		await flushPromises();
 
-		// 少なくとも navigator.usb.requestDevice がコールされていることを実証
-		// backend.open はComlink内包のため直接のアサートはスキップするが、
-		// この呼び出しが成功すること自体がMain ThreadからのUSB呼び出し要求の証明となる
 		expect(requestDeviceSpy).toHaveBeenCalled();
 
 		requestDeviceSpy.mockRestore();
@@ -155,11 +151,6 @@ describe('App.vue', () => {
 		} as any);
 
 		const wrapper = mount(App);
-		const connectBtn = wrapper.findAll('button').find(b => b.text() === 'Connect');
-		expect(connectBtn).toBeDefined();
-		await connectBtn!.trigger('click');
-		await flushPromises();
-
 		const startBtn = wrapper.findAll('button').find(b => b.text() === 'Start Rx');
 		expect(startBtn).toBeDefined();
 		await startBtn!.trigger('click');

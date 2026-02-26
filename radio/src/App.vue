@@ -2,14 +2,14 @@
   <div id="app">
     <div class="actions">
       <div style="margin-bottom: 20px;">
-        <template v-if="!connected">
-          <button class="btn btn-primary" :disabled="rxTransitioning" v-on:click="connect">Connect</button>
-        </template>
-        <template v-else>
+        <div class="action-row">
           <button class="btn btn-primary" :disabled="rxTransitioning" v-on:click="start" v-if="!running">Start Rx</button>
           <button class="btn btn-secondary" :disabled="rxTransitioning" v-on:click="stop" v-if="running">Stop Rx</button>
-          <button class="btn" :disabled="rxTransitioning" v-on:click="disconnect">Disconnect</button>
-        </template>
+        </div>
+        <div class="action-row">
+          <button class="btn btn-settings" type="button" :disabled="rxTransitioning" @click="openSettings">Settings</button>
+          <button class="btn" :disabled="rxTransitioning || !connected" v-on:click="disconnect">Disconnect</button>
+        </div>
       </div>
 
       <div class="form">
@@ -72,19 +72,13 @@
         <label class="checkbox">
           <input type="checkbox" v-model="options.ampEnabled"> RF Amp (14dB)
         </label>
-        <label class="checkbox">
-          <input type="checkbox" v-model="options.antennaEnabled"> Antenna Port Power
-        </label>
-        <label class="checkbox">
-          <input type="checkbox" v-model="dcCancelEnabled"> FFT DC Interpolate
-        </label>
       </div>
 
       <div class="body-2" style="margin-top: 20px;" v-if="connected">
         {{ info.boardName }}<br>
         {{ info.firmwareVersion }}
       </div>
-      <div class="perf-panel body-2" v-if="running">
+      <div class="perf-panel body-2" v-if="running && showDebugInfo">
         <div><b>DSP</b></div>
         <div>block interval peak: {{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }} ms</div>
         <div>process peak: {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
@@ -106,6 +100,26 @@
 
       <div class="snackbar" :class="{ show: snackbar.show }">
         {{ snackbar.message }}
+      </div>
+    </div>
+
+    <div class="dialog-overlay" v-if="settingsOpen" @click.self="closeSettings">
+      <div class="settings-dialog">
+        <div class="settings-title">Settings</div>
+        <div class="settings-content">
+          <label class="checkbox">
+            <input type="checkbox" v-model="options.antennaEnabled"> Antenna Port Power
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" v-model="dcCancelEnabled"> FFT DC Interpolate
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" v-model="showDebugInfo"> Show Debug Info
+          </label>
+        </div>
+        <div class="settings-actions">
+          <button class="btn btn-secondary" type="button" @click="closeSettings">Close</button>
+        </div>
       </div>
     </div>
     
@@ -167,6 +181,7 @@ type PersistedSettings = {
   spanHz: number;
   targetFreq: number;
   dcCancelEnabled: boolean;
+  showDebugInfo: boolean;
   ampEnabled: boolean;
   antennaEnabled: boolean;
   lnaGain: number;
@@ -178,6 +193,7 @@ const defaultSettings: PersistedSettings = {
   spanHz: 1_500_000,
   targetFreq: 1_025_000,
   dcCancelEnabled: true,
+  showDebugInfo: true,
   ampEnabled: false,
   antennaEnabled: false,
   lnaGain: 16,
@@ -210,6 +226,7 @@ const loadSettings = (): PersistedSettings => {
         : (typeof parsed.viewBandwidthHz === 'number' ? parsed.viewBandwidthHz : defaultSettings.spanHz),
       targetFreq: getNumber('targetFreq'),
       dcCancelEnabled: getBoolean('dcCancelEnabled'),
+      showDebugInfo: getBoolean('showDebugInfo'),
       ampEnabled: getBoolean('ampEnabled'),
       antennaEnabled: getBoolean('antennaEnabled'),
       lnaGain: getNumber('lnaGain'),
@@ -227,7 +244,9 @@ const spanHz = ref(loadedSettings.spanHz);
 const targetFreq = ref(loadedSettings.targetFreq);
 const rxSampleRate = ref(2_000_000);
 const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
+const showDebugInfo = ref(loadedSettings.showDebugInfo);
 const demodMode = ref(loadedSettings.demodMode);
+const settingsOpen = ref(false);
 
 const defaultIfBandForMode = (mode: string): { minHz: number; maxHz: number } => {
   return mode === 'FM' ? { minHz: 0, maxHz: 75_000 } : { minHz: 0, maxHz: 4_500 };
@@ -396,6 +415,14 @@ const closeKeypad = () => {
   keypadField.value = null;
 };
 
+const openSettings = () => {
+  settingsOpen.value = true;
+};
+
+const closeSettings = () => {
+  settingsOpen.value = false;
+};
+
 const onKeypadSubmit = async (valueHz: number) => {
   const rounded = Math.round(valueHz);
   if (!Number.isFinite(rounded)) return;
@@ -416,6 +443,7 @@ const saveSettings = () => {
       spanHz: spanHz.value,
       targetFreq: targetFreq.value,
       dcCancelEnabled: dcCancelEnabled.value,
+      showDebugInfo: showDebugInfo.value,
       ampEnabled: options.ampEnabled,
       antennaEnabled: options.antennaEnabled,
       lnaGain: options.lnaGain,
@@ -640,10 +668,14 @@ const startRenderLoop = (
 };
 
 const start = async () => {
-  if (!connected.value || running.value || rxTransitioning.value) return;
+  if (running.value || rxTransitioning.value) return;
   rxTransitioning.value = true;
 
   try {
+    if (!connected.value) {
+      await connect();
+      if (!connected.value) return;
+    }
     normalizeTuning();
     await initAudio();
 
@@ -767,6 +799,7 @@ watch(
     spanHz,
     targetFreq,
     dcCancelEnabled,
+    showDebugInfo,
     demodMode,
     () => options.ampEnabled,
     () => options.antennaEnabled,
@@ -868,6 +901,29 @@ body, #app {
 
 .btn-secondary:hover:not(:disabled) {
 	background: #616161;
+}
+
+.btn-settings {
+	background: #37474f;
+}
+
+.btn-settings:hover:not(:disabled) {
+	background: #455a64;
+}
+
+.action-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.actions .action-row .btn {
+	flex: 1;
+	margin: 0;
+}
+
+.action-row + .action-row {
+	margin-top: 8px;
 }
 
 /* Form */
@@ -1031,28 +1087,30 @@ body, #app {
 	box-sizing: border-box;
 }
 
-.dialog {
-	background: #f9f9f9;
-	color: #222;
+.settings-dialog {
+	width: min(360px, calc(100vw - 24px));
+	background: #1a1a1a;
+	color: #ddd;
 	border-radius: 8px;
 	overflow: hidden;
 	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+	border: 1px solid #333;
 }
 
-.dialog-title {
+.settings-title {
 	padding: 12px 16px;
 	font-weight: 600;
-	border-bottom: 1px solid #ddd;
+	border-bottom: 1px solid #333;
 }
 
-.dialog-content {
+.settings-content {
 	padding: 12px 16px;
 }
 
-.dialog-actions {
+.settings-actions {
 	display: flex;
 	justify-content: flex-end;
 	padding: 12px 16px;
-	border-top: 1px solid #ddd;
+	border-top: 1px solid #333;
 }
 </style>
