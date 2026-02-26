@@ -17,6 +17,21 @@ type PerfStats = {
 	stereoBlend: number;
 	stereoLocked: boolean;
 	monoFallbackCount: number;
+	adcPeak: number;
+	fftTargetDb: number;
+	fftNoiseFloorDb: number;
+	fftSnrDb: number;
+};
+
+type AutoGainResult = {
+	initialPeak: number;
+	finalPeak: number;
+	iterations: number;
+	appliedSteps: string[];
+	ampEnabled: boolean;
+	lnaGain: number;
+	vgaGain: number;
+	settled: boolean;
 };
 
 type WasmInitFn = () => Promise<any>;
@@ -72,6 +87,67 @@ const SIMD_PROBE_WASM = new Uint8Array([
 	0x0b, // end
 ]);
 
+const AGC_ACCEPT_MIN = 70;
+const AGC_ACCEPT_MAX = 110;
+const AGC_HARD_HIGH = 120;
+const AGC_HARD_LOW = 50;
+const AGC_MAX_ITERATIONS = 4;
+const AGC_WAIT_STATS_TIMEOUT_MS = 3000;
+const AGC_SETTLE_MS = 300;
+const AGC_VGA_SOFT_MAX = 40;
+const AGC_SNR_IMPROVE_MIN_DB = 0.6;
+const FFT_SIGNAL_NEIGHBOR_BINS = 1;
+
+const toAbortError = () => new DOMException("auto gain aborted", "AbortError");
+
+const throwIfAborted = (signal?: AbortSignal) => {
+	if (signal?.aborted) throw toAbortError();
+};
+
+const waitMs = (ms: number, signal?: AbortSignal) =>
+	new Promise<void>((resolve, reject) => {
+		if (signal?.aborted) {
+			reject(toAbortError());
+			return;
+		}
+		const timer = setTimeout(() => {
+			signal?.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(toAbortError());
+		};
+		signal?.addEventListener("abort", onAbort, { once: true });
+	});
+
+const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+
+const computeFftQuality = (
+	fftBins: Float32Array,
+	targetBin: number
+): { targetDb: number; noiseFloorDb: number; snrDb: number } => {
+	if (fftBins.length === 0) {
+		return { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
+	}
+	const t = clamp(Math.round(targetBin), 0, fftBins.length - 1);
+	let targetDb = -120;
+	const signalStart = clamp(t - FFT_SIGNAL_NEIGHBOR_BINS, 0, fftBins.length - 1);
+	const signalEnd = clamp(t + FFT_SIGNAL_NEIGHBOR_BINS, 0, fftBins.length - 1);
+	for (let i = signalStart; i <= signalEnd; i += 1) {
+		const v = fftBins[i]!;
+		if (v > targetDb) targetDb = v;
+	}
+
+	const sorted = Array.from(fftBins).sort((a, b) => a - b);
+	const mid = Math.floor(sorted.length / 2);
+	const noiseFloorDb = sorted.length % 2 === 0
+		? ((sorted[mid - 1] ?? -120) + (sorted[mid] ?? -120)) * 0.5
+		: (sorted[mid] ?? -120);
+	const snrDb = targetDb - noiseFloorDb;
+	return { targetDb, noiseFloorDb, snrDb };
+};
+
 const supportsWasmSimd = () => {
 	if (typeof WebAssembly === "undefined" || typeof WebAssembly.validate !== "function") {
 		return false;
@@ -107,6 +183,16 @@ export class RadioBackend {
 	private vgaGain = 16;
 	private fmStereoEnabled = true;
 	private fftVisibleBins = 0;
+	private sampleRate = 0;
+	private centerFreq = 0;
+	private targetFreq = 0;
+	private fftSize = 0;
+	private fftVisibleStartBin = 0;
+	private targetVisibleBin = 0;
+	private latestPerfStats?: PerfStats;
+	private latestPerfSeq = 0;
+	private autoGainPromise: Promise<AutoGainResult> | null = null;
+	private autoGainAbortController: AbortController | null = null;
 
 	private async ensureWasm() {
 		if (!this.wasmBindings) {
@@ -189,6 +275,203 @@ export class RadioBackend {
 		if (this.device) await this.device.setVgaGain(val);
 	}
 
+	private normalizedVgaGain(val: number): number {
+		const clamped = Math.max(0, Math.min(62, Math.round(val)));
+		return clamped & ~0x01;
+	}
+
+	private normalizedLnaGain(val: number): number {
+		const clamped = Math.max(0, Math.min(40, Math.round(val)));
+		return clamped & ~0x07;
+	}
+
+	private updateTargetVisibleBin() {
+		if (this.sampleRate <= 0 || this.fftSize <= 0 || this.fftVisibleBins <= 0) {
+			this.targetVisibleBin = 0;
+			return;
+		}
+		const rel = (this.targetFreq - this.centerFreq) / this.sampleRate;
+		const absBin = Math.round((rel + 0.5) * this.fftSize);
+		this.targetVisibleBin = clamp(absBin - this.fftVisibleStartBin, 0, this.fftVisibleBins - 1);
+	}
+
+	private async waitForNextPerfStats(timeoutMs: number, signal?: AbortSignal): Promise<PerfStats> {
+		const startSeq = this.latestPerfSeq;
+		const startedAt = performance.now();
+		while (performance.now() - startedAt < timeoutMs) {
+			throwIfAborted(signal);
+			if (this.latestPerfStats && this.latestPerfSeq > startSeq) {
+				return this.latestPerfStats;
+			}
+			await waitMs(50, signal);
+		}
+		throw new Error("timed out waiting for stats");
+	}
+
+	private async applyStepForPeak(adcPeak: number): Promise<string | null> {
+		if (adcPeak >= AGC_HARD_HIGH) {
+			if (this.ampEnabled) {
+				await this.setAmpEnable(false);
+				return "amp_off";
+			}
+			if (this.lnaGain > 0) {
+				await this.setLnaGain(this.normalizedLnaGain(this.lnaGain - 8));
+				return "lna_down_8";
+			}
+			if (this.vgaGain > 0) {
+				const down = this.vgaGain >= 4 ? 4 : 2;
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain - down));
+				return down === 4 ? "vga_down_4" : "vga_down_2";
+			}
+			return null;
+		}
+		if (adcPeak <= AGC_HARD_LOW) {
+			if (this.vgaGain < AGC_VGA_SOFT_MAX) {
+				const up = this.vgaGain <= AGC_VGA_SOFT_MAX - 4 ? 4 : 2;
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain + up));
+				return up === 4 ? "vga_up_4" : "vga_up_2";
+			}
+			if (this.lnaGain < 40) {
+				await this.setLnaGain(this.normalizedLnaGain(this.lnaGain + 8));
+				return "lna_up_8";
+			}
+			if (this.vgaGain < 62) {
+				const up = this.vgaGain <= 58 ? 4 : 2;
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain + up));
+				return up === 4 ? "vga_up_4" : "vga_up_2";
+			}
+			if (!this.ampEnabled) {
+				await this.setAmpEnable(true);
+				return "amp_on";
+			}
+			return null;
+		}
+		if (adcPeak < AGC_ACCEPT_MIN) {
+			if (this.vgaGain < AGC_VGA_SOFT_MAX) {
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain + 2));
+				return "vga_up_2";
+			}
+			if (this.lnaGain < 40) {
+				await this.setLnaGain(this.normalizedLnaGain(this.lnaGain + 8));
+				return "lna_up_8";
+			}
+			if (this.vgaGain < 62) {
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain + 2));
+				return "vga_up_2";
+			}
+			if (!this.ampEnabled) {
+				await this.setAmpEnable(true);
+				return "amp_on";
+			}
+			return null;
+		}
+		if (adcPeak > AGC_ACCEPT_MAX) {
+			if (this.vgaGain > 0) {
+				await this.setVgaGain(this.normalizedVgaGain(this.vgaGain - 2));
+				return "vga_down_2";
+			}
+			if (this.lnaGain > 0) {
+				await this.setLnaGain(this.normalizedLnaGain(this.lnaGain - 8));
+				return "lna_down_8";
+			}
+			if (this.ampEnabled) {
+				await this.setAmpEnable(false);
+				return "amp_off";
+			}
+			return null;
+		}
+		return null;
+	}
+
+	autoSetGainOnce(): Promise<AutoGainResult> {
+		if (!this.device || !this.receiver) {
+			throw new Error("receiver is not running");
+		}
+		if (this.autoGainPromise) {
+			return this.autoGainPromise;
+		}
+
+		this.autoGainAbortController = new AbortController();
+		const signal = this.autoGainAbortController.signal;
+
+		const run = async (): Promise<AutoGainResult> => {
+			throwIfAborted(signal);
+			const initialStats = await this.waitForNextPerfStats(AGC_WAIT_STATS_TIMEOUT_MS, signal);
+			let currentPeak = initialStats.adcPeak;
+			let currentSnr = Number.isFinite(initialStats.fftSnrDb) ? initialStats.fftSnrDb : 0;
+			const initialPeak = currentPeak;
+			const appliedSteps: string[] = [];
+
+			for (let i = 0; i < AGC_MAX_ITERATIONS; i += 1) {
+				throwIfAborted(signal);
+				if (currentPeak >= AGC_ACCEPT_MIN && currentPeak <= AGC_ACCEPT_MAX) {
+					break;
+				}
+				const applied = await this.applyStepForPeak(currentPeak);
+				if (!applied) {
+					break;
+				}
+				appliedSteps.push(applied);
+				await waitMs(AGC_SETTLE_MS, signal);
+				let nextStats = await this.waitForNextPerfStats(AGC_WAIT_STATS_TIMEOUT_MS, signal);
+				let nextPeak = nextStats.adcPeak;
+				let nextSnr = Number.isFinite(nextStats.fftSnrDb) ? nextStats.fftSnrDb : 0;
+
+				const vgaRaised = applied === "vga_up_2" || applied === "vga_up_4";
+				const vgaIneffective =
+					vgaRaised &&
+					nextPeak <= AGC_ACCEPT_MIN &&
+					nextSnr < currentSnr + AGC_SNR_IMPROVE_MIN_DB &&
+					this.lnaGain < 40;
+				if (vgaIneffective) {
+					if (applied === "vga_up_4") {
+						await this.setVgaGain(this.normalizedVgaGain(this.vgaGain - 4));
+						appliedSteps.push("vga_down_4(rollback)");
+					} else {
+						await this.setVgaGain(this.normalizedVgaGain(this.vgaGain - 2));
+						appliedSteps.push("vga_down_2(rollback)");
+					}
+					await waitMs(AGC_SETTLE_MS, signal);
+					await this.setLnaGain(this.normalizedLnaGain(this.lnaGain + 8));
+					appliedSteps.push("lna_up_8");
+					await waitMs(AGC_SETTLE_MS, signal);
+					nextStats = await this.waitForNextPerfStats(AGC_WAIT_STATS_TIMEOUT_MS, signal);
+					nextPeak = nextStats.adcPeak;
+					nextSnr = Number.isFinite(nextStats.fftSnrDb) ? nextStats.fftSnrDb : 0;
+				}
+
+				currentPeak = nextPeak;
+				currentSnr = nextSnr;
+			}
+
+			const settled = currentPeak >= AGC_ACCEPT_MIN && currentPeak <= AGC_ACCEPT_MAX;
+			return {
+				initialPeak,
+				finalPeak: currentPeak,
+				iterations: appliedSteps.length,
+				appliedSteps,
+				ampEnabled: this.ampEnabled,
+				lnaGain: this.lnaGain,
+				vgaGain: this.vgaGain,
+				settled,
+			};
+		};
+
+		let promise: Promise<AutoGainResult>;
+		promise = run().finally(() => {
+			if (this.autoGainPromise === promise) {
+				this.autoGainPromise = null;
+				this.autoGainAbortController = null;
+			}
+		});
+		this.autoGainPromise = promise;
+		return promise;
+	}
+
+	cancelAutoSetGain() {
+		this.autoGainAbortController?.abort();
+	}
+
 	async setFreq(centerFreq: number) {
 		if (this.device) await this.device.setFreq(centerFreq);
 	}
@@ -236,6 +519,13 @@ export class RadioBackend {
 		this.lnaGain = options.lnaGain;
 		this.vgaGain = options.vgaGain;
 		this.fmStereoEnabled = options.fmStereoEnabled;
+		this.sampleRate = options.sampleRate;
+		this.centerFreq = options.centerFreq;
+		this.targetFreq = options.targetFreq;
+		this.fftSize = options.fftSize;
+		this.fftVisibleStartBin = options.fftVisibleStartBin;
+		this.fftVisibleBins = options.fftVisibleBins;
+		this.updateTargetVisibleBin();
 
 		// Rust Wasm側のReceiverインスタンスを作成
 		this.receiver = new this.wasmBindings.Receiver(
@@ -276,7 +566,6 @@ export class RadioBackend {
 			Math.ceil(demodSamplesPerBlock * (options.outputSampleRate / demodRate) * 2 * audioChannels)
 		);
 		const fftCapacity = options.fftSize;
-		this.fftVisibleBins = options.fftVisibleBins;
 		await this.receiver.alloc_io_buffers(
 			HackRF.TRANSFER_BUFFER_SIZE,
 			audioCapacity,
@@ -314,7 +603,8 @@ export class RadioBackend {
 				fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
 			};
 
-		let fftScratch = new Float32Array(this.fftVisibleBins);
+			let fftScratch = new Float32Array(this.fftVisibleBins);
+			this.latestPerfStats = undefined;
 
 		let perfStarted = false;
 		let perfWindowStart = 0;
@@ -347,10 +637,10 @@ export class RadioBackend {
 			return false;
 		};
 
-		const snapshotPerf = (now: number): PerfStats | undefined => {
-			if (!perfStarted) return undefined;
-			const windowMs = now - perfWindowStart;
-			if (windowMs < 1000 || blockCount === 0) return undefined;
+			const snapshotPerf = (now: number, fftFrame?: Float32Array): PerfStats | undefined => {
+				if (!perfStarted) return undefined;
+				const windowMs = now - perfWindowStart;
+				if (windowMs < 1000 || blockCount === 0) return undefined;
 
 			const totalSec = Math.max(0.000001, (now - perfTotalStart) / 1000);
 			const demodStatsRaw = this.receiver?.get_stats?.();
@@ -358,16 +648,25 @@ export class RadioBackend {
 				demodStatsRaw && typeof demodStatsRaw === "object"
 					? (demodStatsRaw as Record<string, unknown>)
 					: {};
-			const stats: PerfStats = {
-				droppedIqBlocksCount,
-				blockIntervalMsPeak,
-				dspProcessMsPeak,
-				audioOutHzLong: audioFramesOutTotal / totalSec,
-				pilotLevel: readStatNum(demodStats, "pilotLevel", "pilot_level"),
-				stereoBlend: readStatNum(demodStats, "stereoBlend", "stereo_blend"),
-				stereoLocked: readStatBool(demodStats, "stereoLocked", "stereo_locked"),
-				monoFallbackCount: readStatNum(demodStats, "monoFallbackCount", "mono_fallback_count"),
-			};
+				const fftQuality = fftFrame
+					? computeFftQuality(fftFrame, this.targetVisibleBin)
+					: { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
+				const stats: PerfStats = {
+					droppedIqBlocksCount,
+					blockIntervalMsPeak,
+					dspProcessMsPeak,
+					audioOutHzLong: audioFramesOutTotal / totalSec,
+					pilotLevel: readStatNum(demodStats, "pilotLevel", "pilot_level"),
+					stereoBlend: readStatNum(demodStats, "stereoBlend", "stereo_blend"),
+					stereoLocked: readStatBool(demodStats, "stereoLocked", "stereo_locked"),
+					monoFallbackCount: readStatNum(demodStats, "monoFallbackCount", "mono_fallback_count"),
+					adcPeak: readStatNum(demodStats, "adcPeak", "adc_peak"),
+					fftTargetDb: fftQuality.targetDb,
+					fftNoiseFloorDb: fftQuality.noiseFloorDb,
+					fftSnrDb: fftQuality.snrDb,
+				};
+					this.latestPerfStats = stats;
+					this.latestPerfSeq += 1;
 
 			perfWindowStart = now;
 			blockCount = 0;
@@ -434,13 +733,14 @@ export class RadioBackend {
 					}
 					fftScratch.set(fftReadView.subarray(0, visibleBins));
 					audioFramesOutTotal += Math.floor(audioLen / audioChannels);
-					const perf = snapshotPerf(performance.now());
-					onData(fftScratch, perf);
-			}
-		});
-	}
+						const perf = snapshotPerf(performance.now(), fftScratch);
+						onData(fftScratch, perf);
+				}
+			});
+		}
 
 	async stopRx() {
+		this.cancelAutoSetGain();
 		if (this.device) {
 			await this.device.stopRx();
 		}
@@ -457,9 +757,17 @@ export class RadioBackend {
 			this.receiver = undefined;
 		}
 		this.fftVisibleBins = 0;
+		this.sampleRate = 0;
+		this.fftSize = 0;
+		this.fftVisibleStartBin = 0;
+		this.targetVisibleBin = 0;
+		this.latestPerfStats = undefined;
 	}
 
 	async setTargetFreq(centerFreq: number, targetFreq: number) {
+		this.centerFreq = centerFreq;
+		this.targetFreq = targetFreq;
+		this.updateTargetVisibleBin();
 		if (this.receiver) {
 			this.receiver.set_target_freq(centerFreq, targetFreq);
 		}
@@ -485,9 +793,11 @@ export class RadioBackend {
 	}
 
 	async setFftView(startBin: number, visibleBins: number) {
+		this.fftVisibleStartBin = startBin;
+		this.fftVisibleBins = visibleBins;
+		this.updateTargetVisibleBin();
 		if (this.receiver) {
 			this.receiver.set_fft_view(startBin, visibleBins);
-			this.fftVisibleBins = visibleBins;
 		}
 	}
 }

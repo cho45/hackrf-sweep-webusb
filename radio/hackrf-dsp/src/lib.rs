@@ -109,6 +109,7 @@ pub struct Receiver {
     if_max_hz: f32,
     dc_cancel_enabled: bool,
     fm_stereo_enabled: bool,
+    adc_peak: f32,
     fft_visible_start: usize,
     fft_visible_len: usize,
     mode: DemodMode,
@@ -145,6 +146,7 @@ pub struct ReceiverStats {
     stereo_blend: f32,
     stereo_locked: bool,
     mono_fallback_count: u32,
+    adc_peak: f32,
 }
 
 #[wasm_bindgen]
@@ -167,6 +169,11 @@ impl ReceiverStats {
     #[wasm_bindgen(getter)]
     pub fn mono_fallback_count(&self) -> u32 {
         self.mono_fallback_count
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn adc_peak(&self) -> f32 {
+        self.adc_peak
     }
 }
 
@@ -217,6 +224,13 @@ fn interpolate_fft_dc_bins(fft_db: &mut [f32], half_width: usize) {
         let t = (idx - left_idx) as f32;
         fft_db[idx] = left + slope * t;
     }
+}
+
+#[inline]
+fn block_adc_peak(iq_data: &[i8]) -> f32 {
+    iq_data
+        .iter()
+        .fold(0.0f32, |peak, &v| peak.max((v as f32).abs()))
 }
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
@@ -337,6 +351,7 @@ impl Receiver {
             if_max_hz,
             dc_cancel_enabled,
             fm_stereo_enabled: true,
+            adc_peak: 0.0,
             fft_visible_start,
             fft_visible_len,
             mode,
@@ -540,6 +555,7 @@ impl Receiver {
             stereo_blend: stereo.stereo_blend,
             stereo_locked: stereo.stereo_locked,
             mono_fallback_count: stereo.mono_fallback_count,
+            adc_peak: self.adc_peak,
         }
     }
 
@@ -602,6 +618,7 @@ impl Receiver {
 impl Receiver {
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     fn mix_iq_to_baseband(&mut self, iq_data: &[i8]) {
+        self.adc_peak = block_adc_peak(iq_data);
         let num_samples = iq_data.len() / 2;
         self.baseband_buffer
             .resize(num_samples, Complex::new(0.0, 0.0));
@@ -637,6 +654,7 @@ impl Receiver {
 
     #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
     fn mix_iq_to_baseband(&mut self, iq_data: &[i8]) {
+        self.adc_peak = block_adc_peak(iq_data);
         self.baseband_buffer.clear();
         self.baseband_buffer.reserve(iq_data.len() / 2);
         for iq in iq_data.chunks_exact(2) {
@@ -949,6 +967,41 @@ mod tests {
         for (idx, exp) in (5usize..=9).zip(expected.iter()) {
             assert!((bins[idx] - exp).abs() < 1e-4, "idx={} got={} expected={}", idx, bins[idx], exp);
         }
+    }
+
+    #[test]
+    fn block_adc_peak_returns_max_abs_value() {
+        let iq = [0i8, -3, 12, -45, 44, 9, -1, 1];
+        approx_eq(block_adc_peak(&iq), 45.0);
+    }
+
+    #[test]
+    fn receiver_stats_adc_peak_tracks_latest_block() {
+        let mut rx = Receiver::new(
+            2_000_000.0,
+            100_000_000.0,
+            100_000_000.0,
+            "AM",
+            48_000.0,
+            1024,
+            0,
+            1024,
+            0.0,
+            4_500.0,
+            true,
+        );
+        let mut audio_out = vec![0.0f32; 8192];
+        let mut fft_out = vec![0.0f32; 1024];
+
+        let mut block1 = vec![0i8; 4096];
+        block1[17] = -45;
+        rx.process_into(&block1, &mut audio_out, &mut fft_out);
+        approx_eq(rx.get_stats().adc_peak(), 45.0);
+
+        let mut block2 = vec![0i8; 4096];
+        block2[29] = -128;
+        rx.process_into(&block2, &mut audio_out, &mut fft_out);
+        approx_eq(rx.get_stats().adc_peak(), 128.0);
     }
 
     #[test]

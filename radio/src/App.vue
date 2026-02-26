@@ -48,30 +48,49 @@
           </div>
         </div>
 
-        <div class="divider"></div>
-
-        <div class="field">
-          <label>LNA Gain (IF)</label>
-          <div class="field-input">
-            <input type="range" min="0" max="40" step="8" v-model.number="options.lnaGain" class="field-range" />
-            <input type="number" min="0" max="40" step="8" v-model.number="options.lnaGain" class="field-number" />
-            <span class="field-suffix">dB</span>
+        <fieldset class="gain-fieldset">
+          <legend>Gain</legend>
+          <div class="field auto-gain-action">
+            <button
+              class="btn btn-secondary"
+              type="button"
+              :disabled="!running || rxTransitioning || autoGainRunning"
+              @click="runAutoSetGain"
+            >
+              {{ autoGainRunning ? 'Auto Setting...' : 'Auto Set Gain' }}
+            </button>
+            <div class="caption" v-if="autoGainSummary">{{ autoGainSummary }}</div>
+            <div class="caption">
+              ADC Peak:
+              <template v-if="running">
+                {{ fmtNum(dspPerf.adcPeak, 0) }} ({{ fmtNum(dspPerf.adcPeak / 127 * 100, 1) }}%)
+              </template>
+              <template v-else>-</template>
+            </div>
           </div>
-        </div>
 
-        <div class="field">
-          <label>VGA Gain (Baseband)</label>
-          <div class="field-input">
-            <input type="range" min="0" max="62" step="2" v-model.number="options.vgaGain" class="field-range" />
-            <input type="number" min="0" max="62" step="2" v-model.number="options.vgaGain" class="field-number" />
-            <span class="field-suffix">dB</span>
+          <div class="field">
+            <label>VGA Gain (Baseband)</label>
+            <div class="field-input">
+              <input type="range" min="0" max="62" step="2" v-model.number="options.vgaGain" class="field-range" />
+              <input type="number" min="0" max="62" step="2" v-model.number="options.vgaGain" class="field-number" />
+              <span class="field-suffix">dB</span>
+            </div>
           </div>
-        </div>
-        <div class="divider"></div>
 
-        <label class="checkbox">
-          <input type="checkbox" v-model="options.ampEnabled"> RF Amp (14dB)
-        </label>
+          <div class="field">
+            <label>LNA Gain (IF)</label>
+            <div class="field-input">
+              <input type="range" min="0" max="40" step="8" v-model.number="options.lnaGain" class="field-range" />
+              <input type="number" min="0" max="40" step="8" v-model.number="options.lnaGain" class="field-number" />
+              <span class="field-suffix">dB</span>
+            </div>
+          </div>
+
+          <label class="checkbox">
+            <input type="checkbox" v-model="options.ampEnabled"> RF Amp (14dB)
+          </label>
+        </fieldset>
       </div>
 
       <div class="body-2" style="margin-top: 20px;" v-if="connected">
@@ -84,6 +103,7 @@
         <div>process peak: {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
         <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
         <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
+        <div>fft target/noise/snr: {{ fmtNum(dspPerf.fftTargetDb, 1) }} / {{ fmtNum(dspPerf.fftNoiseFloorDb, 1) }} / {{ fmtNum(dspPerf.fftSnrDb, 1) }} dB</div>
         <div>stereo: {{ dspPerf.stereoLocked ? 'LOCK' : 'MONO' }} / blend {{ fmtNum(dspPerf.stereoBlend, 2) }}</div>
         <div>pilot: {{ fmtNum(dspPerf.pilotLevel, 3) }} / mono fallback: {{ fmtNum(dspPerf.monoFallbackCount, 0) }}</div>
 
@@ -166,7 +186,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onUnmounted, watch } from 'vue';
+import { ref, reactive, computed, onUnmounted, watch, nextTick } from 'vue';
 import * as Comlink from 'comlink';
 import { WaterfallGL, Waterfall } from './utils';
 import { HackRF } from './hackrf';
@@ -299,6 +319,20 @@ type DspPerfStats = {
   stereoBlend: number;
   stereoLocked: boolean;
   monoFallbackCount: number;
+  adcPeak: number;
+  fftTargetDb: number;
+  fftNoiseFloorDb: number;
+  fftSnrDb: number;
+};
+type AutoGainResult = {
+  initialPeak: number;
+  finalPeak: number;
+  iterations: number;
+  appliedSteps: string[];
+  ampEnabled: boolean;
+  lnaGain: number;
+  vgaGain: number;
+  settled: boolean;
 };
 const keypadField = ref<KeypadField | null>(null);
 const keypadOpenToken = ref(0);
@@ -377,6 +411,10 @@ const dspPerf = reactive({
   stereoBlend: 0,
   stereoLocked: false,
   monoFallbackCount: 0,
+  adcPeak: 0,
+  fftTargetDb: 0,
+  fftNoiseFloorDb: 0,
+  fftSnrDb: 0,
 });
 const drawPerf = reactive({
   fps: 0,
@@ -397,6 +435,9 @@ const activeRxSampleRate = ref<number | null>(null);
 const activeRfCenterFreq = ref<number | null>(null);
 const activeFftSize = ref(0);
 const activeFftVisibleBins = ref(0);
+const autoGainRunning = ref(false);
+const autoGainSummary = ref('');
+const suppressManualGainSync = ref(false);
 
 const showSnackbar = (msg: string) => {
   snackbar.message = msg;
@@ -613,6 +654,27 @@ const onDemodModeChange = async () => {
   }
 };
 
+const runAutoSetGain = async () => {
+  if (!backend || !running.value || autoGainRunning.value) return;
+  autoGainRunning.value = true;
+  try {
+    const result = await backend.autoSetGainOnce() as AutoGainResult;
+    suppressManualGainSync.value = true;
+    options.ampEnabled = !!result.ampEnabled;
+    options.lnaGain = result.lnaGain;
+    options.vgaGain = result.vgaGain;
+    await nextTick();
+    autoGainSummary.value = `ADC ${result.initialPeak.toFixed(0)} -> ${result.finalPeak.toFixed(0)} / ${result.iterations} steps`;
+    showSnackbar(`Auto Set Gain: ${result.settled ? 'settled' : 'partial'}`);
+  } catch (e: any) {
+    autoGainSummary.value = '';
+    showSnackbar("Auto Set Gain Error: " + (e?.message ?? String(e)));
+  } finally {
+    suppressManualGainSync.value = false;
+    autoGainRunning.value = false;
+  }
+};
+
 const connect = async () => {
   if (!backend) {
     backend = await new (WorkerBackend as any)();
@@ -656,6 +718,7 @@ const connect = async () => {
 
 const disconnect = async () => {
   if (rxTransitioning.value) return;
+  await backend?.cancelAutoSetGain?.();
   if (backend) {
     if (running.value) await stop();
     await backend.close();
@@ -861,6 +924,10 @@ const start = async () => {
         dspPerf.stereoBlend = perf.stereoBlend;
         dspPerf.stereoLocked = perf.stereoLocked;
         dspPerf.monoFallbackCount = perf.monoFallbackCount;
+        dspPerf.adcPeak = perf.adcPeak;
+        dspPerf.fftTargetDb = perf.fftTargetDb;
+        dspPerf.fftNoiseFloorDb = perf.fftNoiseFloorDb;
+        dspPerf.fftSnrDb = perf.fftSnrDb;
       }
     });
 
@@ -906,6 +973,7 @@ const start = async () => {
 
 const stop = async () => {
   if (!running.value || rxTransitioning.value) return;
+  await backend?.cancelAutoSetGain?.();
   rxTransitioning.value = true;
   try {
     if (backend) {
@@ -924,9 +992,18 @@ const stop = async () => {
 };
 
 // オプションの監視
-watch(() => options.lnaGain, (val) => { if (connected.value) backend.setLnaGain(val); });
-watch(() => options.vgaGain, (val) => { if (connected.value) backend.setVgaGain(val); });
-watch(() => options.ampEnabled, (val) => { if (connected.value) backend.setAmpEnable(val); });
+watch(() => options.lnaGain, (val) => {
+  if (suppressManualGainSync.value) return;
+  if (connected.value) backend.setLnaGain(val);
+});
+watch(() => options.vgaGain, (val) => {
+  if (suppressManualGainSync.value) return;
+  if (connected.value) backend.setVgaGain(val);
+});
+watch(() => options.ampEnabled, (val) => {
+  if (suppressManualGainSync.value) return;
+  if (connected.value) backend.setAmpEnable(val);
+});
 watch(() => options.antennaEnabled, (val) => { if (connected.value) backend.setAntennaEnable(val); });
 watch(() => dcCancelEnabled.value, (val) => {
   if (connected.value && running.value) backend.setDcCancelEnabled(val);
@@ -951,6 +1028,7 @@ watch(
 );
 
 onUnmounted(() => {
+  void backend?.cancelAutoSetGain?.();
   disconnect();
 });
 </script>
@@ -1071,6 +1149,24 @@ body, #app {
 /* Form */
 .form {
 	margin-top: 16px;
+}
+
+.gain-fieldset {
+	margin: 16px 0 0;
+	padding: 12px;
+	border: 1px solid #333;
+	border-radius: 6px;
+}
+
+.gain-fieldset legend {
+	padding: 0 6px;
+	color: #999;
+	font-size: 12px;
+}
+
+.auto-gain-action .btn {
+	width: 100%;
+	margin: 0;
 }
 
 .field {

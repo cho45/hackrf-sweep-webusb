@@ -154,4 +154,108 @@ describe('RadioBackend', () => {
 		expect(instance.open).toHaveBeenCalledWith(usbDevice);
 		expect(instance.stopRx).toHaveBeenCalled();
 	});
+
+	it('autoSetGainOnce repeats observe/apply until peak settles', async () => {
+		const { RadioBackend } = await import('./worker');
+		const backend = new RadioBackend();
+		const device = createMockDevice();
+		(backend as any).device = device;
+		(backend as any).receiver = {};
+
+		const snapshots = [
+			{ adcPeak: 125, fftSnrDb: 8 },
+			{ adcPeak: 118, fftSnrDb: 8.2 },
+			{ adcPeak: 95, fftSnrDb: 8.4 },
+		];
+		(backend as any).waitForNextPerfStats = vi.fn(async () => snapshots.shift() ?? { adcPeak: 95, fftSnrDb: 8.4 });
+
+		const result = await backend.autoSetGainOnce();
+
+		expect(result.iterations).toBe(2);
+		expect(result.settled).toBe(true);
+		expect(result.lnaGain).toBe(8);
+		expect(result.vgaGain).toBe(14);
+		expect(device.setLnaGain).toHaveBeenCalledWith(8);
+		expect(device.setVgaGain).toHaveBeenCalledWith(14);
+	});
+
+	it('autoSetGainOnce promotes LNA when VGA boost does not improve FFT SNR', async () => {
+		const { RadioBackend } = await import('./worker');
+		const backend = new RadioBackend();
+		const device = createMockDevice();
+		(backend as any).device = device;
+		(backend as any).receiver = {};
+
+		const snapshots = [
+			{ adcPeak: 45, fftSnrDb: 3.0 }, // initial
+			{ adcPeak: 49, fftSnrDb: 3.1 }, // after vga_up_4 (ineffective)
+			{ adcPeak: 68, fftSnrDb: 5.6 }, // after rollback + lna_up_8
+			{ adcPeak: 75, fftSnrDb: 6.0 }, // next vga_up_2
+		];
+		(backend as any).waitForNextPerfStats = vi.fn(async () => snapshots.shift() ?? { adcPeak: 75, fftSnrDb: 6.0 });
+
+		const result = await backend.autoSetGainOnce();
+
+		expect(result.appliedSteps).toContain('vga_down_4(rollback)');
+		expect(result.appliedSteps).toContain('lna_up_8');
+		expect(device.setLnaGain).toHaveBeenCalledWith(24);
+	});
+
+	it('applyStepForPeak selects expected action for each peak zone', async () => {
+		const { RadioBackend } = await import('./worker');
+		const backend = new RadioBackend();
+		const apply = (peak: number) => (backend as any).applyStepForPeak(peak);
+
+		(backend as any).ampEnabled = true;
+		(backend as any).lnaGain = 16;
+		(backend as any).vgaGain = 16;
+		await expect(apply(125)).resolves.toBe('amp_off');
+
+		(backend as any).ampEnabled = false;
+		(backend as any).lnaGain = 16;
+		(backend as any).vgaGain = 16;
+		await expect(apply(125)).resolves.toBe('lna_down_8');
+
+		(backend as any).ampEnabled = false;
+		(backend as any).lnaGain = 0;
+		(backend as any).vgaGain = 16;
+		await expect(apply(45)).resolves.toBe('vga_up_4');
+
+		(backend as any).ampEnabled = false;
+		(backend as any).lnaGain = 16;
+		(backend as any).vgaGain = 16;
+		await expect(apply(115)).resolves.toBe('vga_down_2');
+
+		(backend as any).ampEnabled = false;
+		(backend as any).lnaGain = 16;
+		(backend as any).vgaGain = 16;
+		await expect(apply(90)).resolves.toBeNull();
+	});
+
+	it('autoSetGainOnce returns the same in-flight promise on concurrent calls', async () => {
+		const { RadioBackend } = await import('./worker');
+		const backend = new RadioBackend();
+		const device = createMockDevice();
+		(backend as any).device = device;
+		(backend as any).receiver = {};
+
+		(backend as any).waitForNextPerfStats = vi.fn(async () => ({ adcPeak: 90, fftSnrDb: 6 }));
+
+		const p1 = backend.autoSetGainOnce();
+		const p2 = backend.autoSetGainOnce();
+		expect(p1).toBe(p2);
+		await expect(p1).resolves.toMatchObject({ settled: true, iterations: 0 });
+	});
+
+	it('autoSetGainOnce aborts when cancelAutoSetGain is called', async () => {
+		const { RadioBackend } = await import('./worker');
+		const backend = new RadioBackend();
+		const device = createMockDevice();
+		(backend as any).device = device;
+		(backend as any).receiver = {};
+
+		const p = backend.autoSetGainOnce();
+		backend.cancelAutoSetGain();
+		await expect(p).rejects.toMatchObject({ name: 'AbortError' });
+	});
 });
