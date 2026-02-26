@@ -14,6 +14,18 @@
 
       <div class="form">
         <div class="field">
+          <label>Target Frequency</label>
+          <div class="field-input">
+            <button type="button" class="field-input-btn" @click="openKeypad('target')">
+              {{ formatInputFreq(targetFreq) }}
+            </button>
+          </div>
+          <div class="caption">
+            Demod Target: {{ formatFreq(targetFreq) }} / IF Filter: {{ ifMinHz.toLocaleString() }} - {{ ifMaxHz.toLocaleString() }} Hz (Auto)
+          </div>
+        </div>
+
+        <div class="field">
           <label>Span</label>
           <div class="field-input">
             <button type="button" class="field-input-btn" @click="openKeypad('span')">
@@ -23,18 +35,6 @@
           <div class="caption">
             Rx SampleRate: {{ (rxSampleRate / 1_000_000).toFixed(2) }} Msps / Visible: {{ (spanHz / 1_000_000).toFixed(3) }} MHz<br>
             View Center: {{ formatFreq(viewCenterFreq) }} / RF Center: {{ formatFreq(rfCenterFreq) }} / IF Offset: {{ (Math.abs(ncoOffset) / 1000).toFixed(1) }} kHz
-          </div>
-        </div>
-
-        <div class="field">
-          <label>Target Frequency</label>
-          <div class="field-input">
-            <button type="button" class="field-input-btn" @click="openKeypad('target')">
-              {{ formatInputFreq(targetFreq) }}
-            </button>
-          </div>
-          <div class="caption">
-            Demod Target: {{ formatFreq(targetFreq) }} / IF Filter: {{ ifMinHz.toLocaleString() }} - {{ ifMaxHz.toLocaleString() }} Hz (Auto)
           </div>
         </div>
 
