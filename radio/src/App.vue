@@ -189,7 +189,7 @@ const minTuneFreqHz = 1_000_000;
 const minDisplayBandwidthHz = 100_000;
 const maxHackRFSampleRate = 20_000_000;
 const minHackRFSampleRate = 2_000_000;
-const rxSampleRateCandidatesHz = [2_000_000, 4_000_000, 8_000_000, 10_000_000, 20_000_000] as const;
+const rxSampleRateCandidatesHz = [2_000_000, 4_000_000, 8_000_000, 10_000_000, 12_000_000, 16_000_000, 20_000_000] as const;
 const ifOffsetHz = 250_000; // target からこの分だけRF centerをずらしてDC回避
 
 const settingsStorageKey = 'radio.settings.v2';
