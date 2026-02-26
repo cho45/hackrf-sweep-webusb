@@ -1,3 +1,4 @@
+use std::hint::black_box;
 use std::time::Instant;
 
 use num_complex::Complex;
@@ -23,11 +24,16 @@ const MEASURE_BLOCKS: usize = 60;
 struct BenchCase {
     mode: DemodMode,
     sample_rate: f32,
+    dc_cancel_enabled: bool,
 }
 
 #[derive(Default)]
 struct StageStats {
     front_ns: u128,
+    front_unpack_ns: u128,
+    front_dc_ns: u128,
+    front_mix_ns: u128,
+    front_fft_pack_ns: u128,
     coarse_ns: u128,
     demod_decim_ns: u128,
     demod_ns: u128,
@@ -39,6 +45,18 @@ struct StageStats {
 impl StageStats {
     fn add_front(&mut self, ns: u128) {
         self.front_ns += ns;
+    }
+    fn add_front_unpack(&mut self, ns: u128) {
+        self.front_unpack_ns += ns;
+    }
+    fn add_front_dc(&mut self, ns: u128) {
+        self.front_dc_ns += ns;
+    }
+    fn add_front_mix(&mut self, ns: u128) {
+        self.front_mix_ns += ns;
+    }
+    fn add_front_fft_pack(&mut self, ns: u128) {
+        self.front_fft_pack_ns += ns;
     }
     fn add_coarse(&mut self, ns: u128) {
         self.coarse_ns += ns;
@@ -72,6 +90,85 @@ fn print_stage(name: &str, stage_ns: u128, total_ns: u128, blocks: usize) {
         0.0
     };
     println!("  {:>11}: {:>7.3} ms ({:>5.1}%)", name, avg_ms, ratio);
+}
+
+fn print_front_stage(name: &str, stage_ns: u128, probe_total_ns: u128, blocks: usize) {
+    let avg_ms = ns_to_ms(stage_ns) / blocks as f64;
+    let ratio = if probe_total_ns > 0 {
+        stage_ns as f64 * 100.0 / probe_total_ns as f64
+    } else {
+        0.0
+    };
+    println!("  {:>11}: {:>7.3} ms ({:>5.1}% of probe)", name, avg_ms, ratio);
+}
+
+struct FrontProfiler {
+    dc_cancel_enabled: bool,
+    dc: DcCanceller,
+    nco: Nco,
+    unpacked: Vec<Complex<f32>>,
+    dc_out: Vec<Complex<f32>>,
+    mixed: Vec<Complex<f32>>,
+    fft_i8: Vec<i8>,
+}
+
+impl FrontProfiler {
+    fn new(sample_rate: f32, dc_cancel_enabled: bool) -> Self {
+        Self {
+            dc_cancel_enabled,
+            dc: DcCanceller::new(sample_rate, FIXED_DC_NOTCH_Q),
+            nco: Nco::new(-250_000.0, sample_rate),
+            unpacked: Vec::with_capacity(IQ_SAMPLES_PER_BLOCK),
+            dc_out: Vec::with_capacity(IQ_SAMPLES_PER_BLOCK),
+            mixed: Vec::with_capacity(IQ_SAMPLES_PER_BLOCK),
+            fft_i8: vec![0i8; FFT_SIZE * 2],
+        }
+    }
+
+    fn profile_block(&mut self, iq: &[i8], stats: &mut StageStats) {
+        let t0 = Instant::now();
+        self.unpacked.clear();
+        for s in iq.chunks_exact(2) {
+            self.unpacked
+                .push(Complex::new(s[0] as f32 / 128.0, s[1] as f32 / 128.0));
+        }
+        let unpack_ns = t0.elapsed().as_nanos();
+
+        let (dc_ns, mix_input): (u128, &[Complex<f32>]) = if self.dc_cancel_enabled {
+            let t1 = Instant::now();
+            self.dc_out.clear();
+            for &sample in &self.unpacked {
+                self.dc_out.push(self.dc.process(sample));
+            }
+            (t1.elapsed().as_nanos(), &self.dc_out)
+        } else {
+            (0, &self.unpacked)
+        };
+
+        let t2 = Instant::now();
+        self.mixed.clear();
+        for &sample in mix_input {
+            self.mixed.push(sample * self.nco.step());
+        }
+        let mix_ns = t2.elapsed().as_nanos();
+
+        let t3 = Instant::now();
+        let pack_len = FFT_SIZE.min(self.mixed.len());
+        for (idx, mixed) in self.mixed.iter().take(pack_len).enumerate() {
+            self.fft_i8[idx * 2] = (mixed.re.clamp(-0.99, 0.99) * 127.0) as i8;
+            self.fft_i8[idx * 2 + 1] = (mixed.im.clamp(-0.99, 0.99) * 127.0) as i8;
+        }
+        let fft_pack_ns = t3.elapsed().as_nanos();
+
+        // 計測ループが最適化で消されないようにする。
+        black_box(self.fft_i8[0]);
+        black_box(self.mixed.len());
+
+        stats.add_front_unpack(unpack_ns);
+        stats.add_front_dc(dc_ns);
+        stats.add_front_mix(mix_ns);
+        stats.add_front_fft_pack(fft_pack_ns);
+    }
 }
 
 fn make_window(n: usize) -> Vec<f32> {
@@ -145,14 +242,26 @@ fn run_case(case: BenchCase) {
 
         let t0 = Instant::now();
         baseband.clear();
-        for (idx, s) in iq.chunks_exact(2).enumerate() {
-            let raw = Complex::new(s[0] as f32 / 128.0, s[1] as f32 / 128.0);
-            let sample = dc.process(raw);
-            let mixed = sample * nco.step();
-            baseband.push(mixed);
-            if idx < FFT_SIZE {
-                fft_i8[idx * 2] = (mixed.re.clamp(-0.99, 0.99) * 127.0) as i8;
-                fft_i8[idx * 2 + 1] = (mixed.im.clamp(-0.99, 0.99) * 127.0) as i8;
+        if case.dc_cancel_enabled {
+            for (idx, s) in iq.chunks_exact(2).enumerate() {
+                let raw = Complex::new(s[0] as f32 / 128.0, s[1] as f32 / 128.0);
+                let sample = dc.process(raw);
+                let mixed = sample * nco.step();
+                baseband.push(mixed);
+                if idx < FFT_SIZE {
+                    fft_i8[idx * 2] = (mixed.re.clamp(-0.99, 0.99) * 127.0) as i8;
+                    fft_i8[idx * 2 + 1] = (mixed.im.clamp(-0.99, 0.99) * 127.0) as i8;
+                }
+            }
+        } else {
+            for (idx, s) in iq.chunks_exact(2).enumerate() {
+                let sample = Complex::new(s[0] as f32 / 128.0, s[1] as f32 / 128.0);
+                let mixed = sample * nco.step();
+                baseband.push(mixed);
+                if idx < FFT_SIZE {
+                    fft_i8[idx * 2] = (mixed.re.clamp(-0.99, 0.99) * 127.0) as i8;
+                    fft_i8[idx * 2 + 1] = (mixed.im.clamp(-0.99, 0.99) * 127.0) as i8;
+                }
             }
         }
         let front_ns = t0.elapsed().as_nanos();
@@ -195,6 +304,15 @@ fn run_case(case: BenchCase) {
         }
     }
 
+    // 詳細内訳は別パスで計測して、パイプライン全体計測への干渉を避ける。
+    let mut front_profiler = FrontProfiler::new(case.sample_rate, case.dc_cancel_enabled);
+    for block in 0..total_blocks {
+        let iq = generate_iq_block(case.sample_rate, block, case.mode);
+        if block >= WARMUP_BLOCKS {
+            front_profiler.profile_block(&iq, &mut stats);
+        }
+    }
+
     let avg_total_ms = ns_to_ms(stats.total_ns) / MEASURE_BLOCKS as f64;
     let blocks_per_sec = if avg_total_ms > 0.0 {
         1000.0 / avg_total_ms
@@ -211,7 +329,43 @@ fn run_case(case: BenchCase) {
         plan.demod_factor,
         plan.demod_sample_rate
     );
+    println!(
+        "  options: dc_cancel={}",
+        if case.dc_cancel_enabled { "on" } else { "off" }
+    );
     print_stage("front", stats.front_ns, stats.total_ns, MEASURE_BLOCKS);
+    let front_probe_total =
+        stats.front_unpack_ns + stats.front_dc_ns + stats.front_mix_ns + stats.front_fft_pack_ns;
+    print_stage(
+        "front_probe",
+        front_probe_total,
+        stats.total_ns,
+        MEASURE_BLOCKS,
+    );
+    print_front_stage(
+        "front_unpack",
+        stats.front_unpack_ns,
+        front_probe_total,
+        MEASURE_BLOCKS,
+    );
+    print_front_stage(
+        "front_dc",
+        stats.front_dc_ns,
+        front_probe_total,
+        MEASURE_BLOCKS,
+    );
+    print_front_stage(
+        "front_mix",
+        stats.front_mix_ns,
+        front_probe_total,
+        MEASURE_BLOCKS,
+    );
+    print_front_stage(
+        "front_pack",
+        stats.front_fft_pack_ns,
+        front_probe_total,
+        MEASURE_BLOCKS,
+    );
     print_stage("coarse", stats.coarse_ns, stats.total_ns, MEASURE_BLOCKS);
     print_stage("demod_decim", stats.demod_decim_ns, stats.total_ns, MEASURE_BLOCKS);
     print_stage("demod", stats.demod_ns, stats.total_ns, MEASURE_BLOCKS);
@@ -236,26 +390,62 @@ pub fn run_default_pipeline_bench() {
         BenchCase {
             mode: DemodMode::Am,
             sample_rate: 2_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Am,
+            sample_rate: 2_000_000.0,
+            dc_cancel_enabled: false,
         },
         BenchCase {
             mode: DemodMode::Am,
             sample_rate: 10_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Am,
+            sample_rate: 10_000_000.0,
+            dc_cancel_enabled: false,
         },
         BenchCase {
             mode: DemodMode::Am,
             sample_rate: 20_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Am,
+            sample_rate: 20_000_000.0,
+            dc_cancel_enabled: false,
         },
         BenchCase {
             mode: DemodMode::Fm,
             sample_rate: 2_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Fm,
+            sample_rate: 2_000_000.0,
+            dc_cancel_enabled: false,
         },
         BenchCase {
             mode: DemodMode::Fm,
             sample_rate: 10_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Fm,
+            sample_rate: 10_000_000.0,
+            dc_cancel_enabled: false,
         },
         BenchCase {
             mode: DemodMode::Fm,
             sample_rate: 20_000_000.0,
+            dc_cancel_enabled: true,
+        },
+        BenchCase {
+            mode: DemodMode::Fm,
+            sample_rate: 20_000_000.0,
+            dc_cancel_enabled: false,
         },
     ];
 

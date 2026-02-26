@@ -8,7 +8,8 @@ use num_complex::Complex;
 /// - z=1 に零点を置くため、DCを強く抑圧する
 /// - r を 1 に近づけるほどノッチは急峻になる
 struct DcNotch2 {
-    r: f32,
+    two_r: f32,
+    r2: f32,
     x1: Complex<f32>,
     x2: Complex<f32>,
     y1: Complex<f32>,
@@ -17,8 +18,11 @@ struct DcNotch2 {
 
 impl DcNotch2 {
     fn new(r: f32) -> Self {
+        let two_r = 2.0 * r;
+        let r2 = r * r;
         Self {
-            r,
+            two_r,
+            r2,
             x1: Complex::new(0.0, 0.0),
             x2: Complex::new(0.0, 0.0),
             y1: Complex::new(0.0, 0.0),
@@ -27,8 +31,7 @@ impl DcNotch2 {
     }
 
     fn process(&mut self, sample: Complex<f32>) -> Complex<f32> {
-        let r2 = self.r * self.r;
-        let y = sample - self.x1 * 2.0 + self.x2 + self.y1 * (2.0 * self.r) - self.y2 * r2;
+        let y = sample - self.x1 * 2.0 + self.x2 + self.y1 * self.two_r - self.y2 * self.r2;
 
         self.x2 = self.x1;
         self.x1 = sample;

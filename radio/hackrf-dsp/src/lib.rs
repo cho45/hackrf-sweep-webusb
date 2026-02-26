@@ -447,23 +447,34 @@ impl Receiver {
         self.baseband_buffer.reserve(num_samples);
 
         // ベースバンド処理 & NCO
-        for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
-            let i_val = iq[0] as f32 / 128.0;
-            let q_val = iq[1] as f32 / 128.0;
-            let raw_sample = Complex::new(i_val, q_val);
-            let dc_cancelled = self.dc_canceller.process(raw_sample);
-            let sample = if self.dc_cancel_enabled {
-                dc_cancelled
-            } else {
-                raw_sample
-            };
-            let nco_val = self.nco.step();
-            self.baseband_buffer.push(sample * nco_val);
+        if self.dc_cancel_enabled {
+            for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
+                let i_val = iq[0] as f32 / 128.0;
+                let q_val = iq[1] as f32 / 128.0;
+                let raw_sample = Complex::new(i_val, q_val);
+                let sample = self.dc_canceller.process(raw_sample);
+                let nco_val = self.nco.step();
+                self.baseband_buffer.push(sample * nco_val);
 
-            if self.fft_use_processed && idx < fft_n {
-                let n = idx * 2;
-                self.fft_input_buffer[n] = float_to_i8(sample.re);
-                self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
+                if self.fft_use_processed && idx < fft_n {
+                    let n = idx * 2;
+                    self.fft_input_buffer[n] = float_to_i8(sample.re);
+                    self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
+                }
+            }
+        } else {
+            for (idx, iq) in iq_data.chunks_exact(2).enumerate() {
+                let i_val = iq[0] as f32 / 128.0;
+                let q_val = iq[1] as f32 / 128.0;
+                let sample = Complex::new(i_val, q_val);
+                let nco_val = self.nco.step();
+                self.baseband_buffer.push(sample * nco_val);
+
+                if self.fft_use_processed && idx < fft_n {
+                    let n = idx * 2;
+                    self.fft_input_buffer[n] = float_to_i8(sample.re);
+                    self.fft_input_buffer[n + 1] = float_to_i8(sample.im);
+                }
             }
         }
 
