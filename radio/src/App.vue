@@ -126,7 +126,13 @@
       </div>
     </div>
     
-    <div class="canvas-container" ref="canvasContainer">
+    <div
+      class="canvas-container"
+      ref="canvasContainer"
+      @pointermove="onCanvasPointerMove"
+      @pointerleave="hideCanvasPointerFreq"
+      @pointercancel="hideCanvasPointerFreq"
+    >
       <div style="width: 100%; height: 70vh; position: relative">
         <canvas id="waterfall" ref="waterfallCanvas"></canvas>
       </div>
@@ -137,6 +143,13 @@
         <div class="axis" style="left: 50% ">{{ formatFreq(viewCenterFreq) }}</div>
         <div class="axis" style="left: 75%">{{ formatFreq(displayMinFreq + spanHz * 0.75) }}</div>
         <div class="axis right" style="right: 0%">{{ formatFreq(displayMaxFreq) }}</div>
+      </div>
+      <div
+        v-if="pointerFreq.visible"
+        class="pointer-freq"
+        :style="{ left: `${pointerFreq.x}px`, top: `${pointerFreq.y}px` }"
+      >
+        {{ formatPointerFreq(pointerFreq.hz) }}
       </div>
     </div>
     <Keypad
@@ -325,6 +338,14 @@ const audioOutputSampleRate = ref(0);
 
 const waterfallCanvas = ref<HTMLCanvasElement | null>(null);
 const fftCanvas = ref<HTMLCanvasElement | null>(null);
+const canvasContainer = ref<HTMLDivElement | null>(null);
+
+const pointerFreq = reactive({
+  visible: false,
+  x: 0,
+  y: 0,
+  hz: 0,
+});
 
 let waterfall: WaterfallGL | Waterfall | null = null;
 let latestFftFrame: Float32Array | null = null;
@@ -390,6 +411,35 @@ const formatInputFreq = (hz: number) => {
   const value = hz / factor;
   const precision = unit === 'Hz' ? 0 : 3;
   return `${value.toFixed(precision)} ${unit}`;
+};
+
+const formatPointerFreq = (hz: number) => {
+  if (Math.abs(hz) >= 1_000_000) return `${(hz / 1_000_000).toFixed(3)} MHz`;
+  return `${(hz / 1_000).toFixed(3)} kHz`;
+};
+
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
+
+const pointerLabelYOffset = 25;
+
+const onCanvasPointerMove = (event: PointerEvent) => {
+  const container = canvasContainer.value;
+  if (!container) return;
+  const rect = container.getBoundingClientRect();
+  if (rect.width <= 0) return;
+
+  const localX = clamp(event.clientX - rect.left, 0, rect.width);
+  const localY = clamp(event.clientY - rect.top, 0, rect.height);
+  const ratio = localX / rect.width;
+
+  pointerFreq.visible = true;
+  pointerFreq.hz = displayMinFreq.value + spanHz.value * ratio;
+  pointerFreq.x = clamp(localX, 56, Math.max(56, rect.width - 56));
+  pointerFreq.y = clamp(localY + pointerLabelYOffset, 14, Math.max(14, rect.height - 14));
+};
+
+const hideCanvasPointerFreq = () => {
+  pointerFreq.visible = false;
 };
 
 const chooseSampleRate = (requiredBandwidth: number) => {
@@ -918,6 +968,7 @@ body, #app {
 	background: #000;
 	display: flex;
 	flex-direction: column;
+	position: relative;
 }
 
 #fft,
@@ -1136,7 +1187,22 @@ body, #app {
 .axis.right {
 	border-left: none;
 	border-right: 2px solid #f33;
-	transform: translateX(-100%);
+	transform: none;
+}
+
+.pointer-freq {
+	position: absolute;
+	transform: translate(-50%, -50%);
+	font-weight: 600;
+	font-size: 12px;
+	color: #fff;
+	background: rgba(0, 0, 0, 0.72);
+	border: 1px solid rgba(255, 255, 255, 0.4);
+	border-radius: 4px;
+	padding: 2px 8px;
+	white-space: nowrap;
+	pointer-events: none;
+	z-index: 20;
 }
 
 .dialog-overlay {
