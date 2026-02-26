@@ -65,20 +65,23 @@ window.devicePixelRatio = 2;
 
 // Appコンポーネントが正常にマウントされ、タイトルが表示されるかをテストする
 describe('App.vue', () => {
-	it('renders the header correctly', () => {
+	it('renders tuning fields', () => {
 		const wrapper = mount(App);
-		expect(wrapper.find('h1').text()).toBe('Radio SDR (AM Demodulation)');
+		const labels = wrapper.findAll('label').map((v) => v.text());
+		expect(labels).toContain('Target Frequency');
+		expect(labels).toContain('Span');
 	});
 
 	it('has initial disconnected state', () => {
 		const wrapper = mount(App);
 		const connectBtn = wrapper.findAll('button').find(b => b.text() === 'Connect');
 		const disconnectBtn = wrapper.findAll('button').find(b => b.text() === 'Disconnect');
+		const startBtn = wrapper.findAll('button').find(b => b.text() === 'Start Rx');
 
 		expect(connectBtn).toBeDefined();
-		// 初期状態ではConnect可能、Disconnect不可であることの確認
 		expect(connectBtn!.attributes('disabled')).toBeUndefined();
-		expect(disconnectBtn!.attributes('disabled')).toBeDefined();
+		expect(disconnectBtn).toBeUndefined();
+		expect(startBtn).toBeUndefined();
 	});
 
 	it('should call navigator.usb.requestDevice and pass ids to backend on connect', async () => {

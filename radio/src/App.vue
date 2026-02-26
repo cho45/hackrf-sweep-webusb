@@ -14,42 +14,27 @@
 
       <div class="form">
         <div class="field">
-          <label>View Center Frequency (kHz)</label>
+          <label>Span</label>
           <div class="field-input">
-            <input type="number" min="1000" step="1" v-model.number="viewCenterFreqKHz" @change="onViewRangeChange" />
-          </div>
-        </div>
-
-        <div class="field">
-          <label>View Bandwidth (kHz)</label>
-          <div class="field-input">
-            <input type="number" min="100" step="10" v-model.number="viewBandwidthKHz" @change="onViewRangeChange" />
+            <button type="button" class="field-input-btn" @click="openKeypad('span')">
+              {{ formatInputFreq(spanHz) }}
+            </button>
           </div>
           <div class="caption">
-            Rx SampleRate: {{ (rxSampleRate / 1_000_000).toFixed(2) }} Msps / Visible: {{ (viewBandwidthHz / 1_000_000).toFixed(3) }} MHz<br>
-            RF Center: {{ formatFreq(rfCenterFreq) }} / Target-IF Offset: {{ (ncoOffset / 1000).toFixed(1) }} kHz
+            Rx SampleRate: {{ (rxSampleRate / 1_000_000).toFixed(2) }} Msps / Visible: {{ (spanHz / 1_000_000).toFixed(3) }} MHz<br>
+            View Center: {{ formatFreq(viewCenterFreq) }} / RF Center: {{ formatFreq(rfCenterFreq) }} / IF Offset: {{ (Math.abs(ncoOffset) / 1000).toFixed(1) }} kHz
           </div>
         </div>
 
         <div class="field">
-          <label>Target Frequency (kHz)</label>
+          <label>Target Frequency</label>
           <div class="field-input">
-            <input type="number" min="1000" step="1" v-model.number="targetFreqKHz" @change="onTargetFreqChange" />
+            <button type="button" class="field-input-btn" @click="openKeypad('target')">
+              {{ formatInputFreq(targetFreq) }}
+            </button>
           </div>
-          <div class="caption">NCO Offset: {{ (ncoOffset / 1000).toFixed(1) }} kHz</div>
-        </div>
-
-        <div class="field">
-          <label>IF Min (Hz)</label>
-          <div class="field-input">
-            <input type="number" min="0" step="100" v-model.number="ifMinHz" @change="onIfBandChange" />
-          </div>
-        </div>
-
-        <div class="field">
-          <label>IF Max (Hz)</label>
-          <div class="field-input">
-            <input type="number" min="1" step="100" v-model.number="ifMaxHz" @change="onIfBandChange" />
+          <div class="caption">
+            Demod Target: {{ formatFreq(targetFreq) }} / IF Filter: {{ ifMinHz.toLocaleString() }} - {{ ifMaxHz.toLocaleString() }} Hz (Auto)
           </div>
         </div>
 
@@ -115,12 +100,21 @@
       <div style="width: 100%; height: 30vh; position: relative">
         <canvas id="fft" ref="fftCanvas"></canvas>
         <div class="axis" style="left: 0% ">{{ formatFreq(displayMinFreq) }}</div>
-        <div class="axis" style="left: 25% ">{{ formatFreq(displayMinFreq + viewBandwidthHz * 0.25) }}</div>
+        <div class="axis" style="left: 25% ">{{ formatFreq(displayMinFreq + spanHz * 0.25) }}</div>
         <div class="axis" style="left: 50% ">{{ formatFreq(viewCenterFreq) }}</div>
-        <div class="axis" style="left: 75%">{{ formatFreq(displayMinFreq + viewBandwidthHz * 0.75) }}</div>
+        <div class="axis" style="left: 75%">{{ formatFreq(displayMinFreq + spanHz * 0.75) }}</div>
         <div class="axis right" style="right: 0%">{{ formatFreq(displayMaxFreq) }}</div>
       </div>
     </div>
+    <Keypad
+      v-if="keypadField"
+      :key="`keypad-${keypadField}-${keypadOpenToken}`"
+      :title="keypadTitle"
+      :unit="keypadUnit"
+      :model-value="keypadInitialValue"
+      @submit="onKeypadSubmit"
+      @close="closeKeypad"
+    />
   </div>
 </template>
 
@@ -129,6 +123,7 @@ import { ref, reactive, computed, onUnmounted, watch } from 'vue';
 import * as Comlink from 'comlink';
 import { WaterfallGL, Waterfall } from './utils';
 import { HackRF } from './hackrf';
+import Keypad from './components/Keypad.vue';
 
 // comlink 経由でバックエンド(WASM/HackRF処理)をロード
 const WorkerBackend = Comlink.wrap<any>(new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' }));
@@ -146,31 +141,25 @@ const minDisplayBandwidthHz = 100_000;
 const maxHackRFSampleRate = 20_000_000;
 const minHackRFSampleRate = 2_000_000;
 const sampleRateStepHz = 100_000;
-const usableBandwidthRatio = 0.75; // HackRFのBBフィルタ想定帯域
-const forcedTargetOffsetHz = 250_000; // target と RF center の最小分離（DC回避）
+const ifOffsetHz = 250_000; // target からこの分だけRF centerをずらしてDC回避
 
-const settingsStorageKey = 'radio.settings.v1';
+const settingsStorageKey = 'radio.settings.v2';
+const isDemodMode = (mode: unknown): mode is 'AM' | 'FM' => mode === 'AM' || mode === 'FM';
 type PersistedSettings = {
-  viewCenterFreq: number;
-  viewBandwidthHz: number;
+  spanHz: number;
   targetFreq: number;
-  ifMinHz: number;
-  ifMaxHz: number;
   dcCancelEnabled: boolean;
   fftUseProcessed: boolean;
   ampEnabled: boolean;
   antennaEnabled: boolean;
   lnaGain: number;
   vgaGain: number;
-  demodMode: string;
+  demodMode: 'AM' | 'FM';
 };
 
 const defaultSettings: PersistedSettings = {
-  viewCenterFreq: 1_025_000,
-  viewBandwidthHz: 1_500_000,
+  spanHz: 1_500_000,
   targetFreq: 1_025_000,
-  ifMinHz: 0,
-  ifMaxHz: 4_500,
   dcCancelEnabled: true,
   fftUseProcessed: true,
   ampEnabled: false,
@@ -182,9 +171,9 @@ const defaultSettings: PersistedSettings = {
 
 const loadSettings = (): PersistedSettings => {
   try {
-    const raw = localStorage.getItem(settingsStorageKey);
+    const raw = localStorage.getItem(settingsStorageKey) ?? localStorage.getItem('radio.settings.v1');
     if (!raw) return { ...defaultSettings };
-    const parsed = JSON.parse(raw) as Partial<PersistedSettings>;
+    const parsed = JSON.parse(raw) as Partial<PersistedSettings> & { viewBandwidthHz?: number };
 
     const getNumber = (key: keyof PersistedSettings) => {
       const value = parsed[key];
@@ -200,18 +189,17 @@ const loadSettings = (): PersistedSettings => {
     };
 
     return {
-      viewCenterFreq: getNumber('viewCenterFreq'),
-      viewBandwidthHz: getNumber('viewBandwidthHz'),
+      spanHz: typeof parsed.spanHz === 'number'
+        ? parsed.spanHz
+        : (typeof parsed.viewBandwidthHz === 'number' ? parsed.viewBandwidthHz : defaultSettings.spanHz),
       targetFreq: getNumber('targetFreq'),
-      ifMinHz: getNumber('ifMinHz'),
-      ifMaxHz: getNumber('ifMaxHz'),
       dcCancelEnabled: getBoolean('dcCancelEnabled'),
       fftUseProcessed: getBoolean('fftUseProcessed'),
       ampEnabled: getBoolean('ampEnabled'),
       antennaEnabled: getBoolean('antennaEnabled'),
       lnaGain: getNumber('lnaGain'),
       vgaGain: getNumber('vgaGain'),
-      demodMode: typeof parsed['demodMode'] === 'string' ? parsed['demodMode'] : defaultSettings.demodMode,
+      demodMode: isDemodMode(parsed.demodMode) ? parsed.demodMode : defaultSettings.demodMode,
     };
   } catch {
     return { ...defaultSettings };
@@ -220,36 +208,50 @@ const loadSettings = (): PersistedSettings => {
 
 const loadedSettings = loadSettings();
 
-const viewCenterFreq = ref(loadedSettings.viewCenterFreq);
-const viewBandwidthHz = ref(loadedSettings.viewBandwidthHz);
+const spanHz = ref(loadedSettings.spanHz);
 const targetFreq = ref(loadedSettings.targetFreq);
-const rfCenterFreq = ref(loadedSettings.targetFreq + forcedTargetOffsetHz);
 const rxSampleRate = ref(2_000_000);
-const ifMinHz = ref(loadedSettings.ifMinHz);
-const ifMaxHz = ref(loadedSettings.ifMaxHz);
 const dcCancelEnabled = ref(loadedSettings.dcCancelEnabled);
 const fftUseProcessed = ref(loadedSettings.fftUseProcessed);
 const demodMode = ref(loadedSettings.demodMode);
 
-const maxDisplayBandwidthHz =
-  maxHackRFSampleRate * usableBandwidthRatio - 2 * forcedTargetOffsetHz;
-const displayMinFreq = computed(() => viewCenterFreq.value - viewBandwidthHz.value / 2);
-const displayMaxFreq = computed(() => viewCenterFreq.value + viewBandwidthHz.value / 2);
+const defaultIfBandForMode = (mode: string): { minHz: number; maxHz: number } => {
+  return mode === 'FM' ? { minHz: 0, maxHz: 75_000 } : { minHz: 0, maxHz: 4_500 };
+};
+
+const maxSpanHz = maxHackRFSampleRate - 2 * Math.abs(ifOffsetHz);
+const ifBand = computed(() => defaultIfBandForMode(demodMode.value));
+const ifMinHz = computed(() => ifBand.value.minHz);
+const ifMaxHz = computed(() => ifBand.value.maxHz);
+const viewCenterFreq = computed(() => targetFreq.value);
+const rfCenterFreq = computed(() => Math.max(minTuneFreqHz, targetFreq.value + ifOffsetHz));
+const displayMinFreq = computed(() => viewCenterFreq.value - spanHz.value / 2);
+const displayMaxFreq = computed(() => viewCenterFreq.value + spanHz.value / 2);
 const ncoOffset = computed(() => targetFreq.value - rfCenterFreq.value);
 
-const targetFreqKHz = computed({
-  get: () => targetFreq.value / 1000,
-  set: (val) => { targetFreq.value = val * 1000; }
+type KeypadField = 'target' | 'span';
+type DisplayUnit = 'Hz' | 'kHz' | 'MHz';
+const keypadField = ref<KeypadField | null>(null);
+const keypadOpenToken = ref(0);
+const keypadTitle = computed(() =>
+  keypadField.value === 'span' ? 'Span' : 'Target Frequency'
+);
+const pickDisplayUnit = (hz: number): DisplayUnit => {
+  if (Math.abs(hz) >= 1_000_000) return 'MHz';
+  if (Math.abs(hz) >= 1_000) return 'kHz';
+  return 'Hz';
+};
+const unitFactor = (unit: DisplayUnit): number => {
+  if (unit === 'MHz') return 1_000_000;
+  if (unit === 'kHz') return 1_000;
+  return 1;
+};
+const keypadUnit = computed<DisplayUnit>(() => {
+  if (keypadField.value === 'span') return pickDisplayUnit(spanHz.value);
+  return pickDisplayUnit(targetFreq.value);
 });
-
-const viewCenterFreqKHz = computed({
-  get: () => viewCenterFreq.value / 1000,
-  set: (val) => { viewCenterFreq.value = val * 1000; }
-});
-
-const viewBandwidthKHz = computed({
-  get: () => viewBandwidthHz.value / 1000,
-  set: (val) => { viewBandwidthHz.value = val * 1000; }
+const keypadInitialValue = computed(() => {
+  return '0';
 });
 
 const options = reactive({
@@ -281,44 +283,27 @@ const formatFreq = (hz: number) => {
   return (hz / 1_000_000).toFixed(3) + " MHz";
 };
 
-const chooseSampleRate = (requiredUsableBandwidth: number) => {
-  const required = requiredUsableBandwidth / usableBandwidthRatio;
-  const stepped = Math.ceil(required / sampleRateStepHz) * sampleRateStepHz;
+const formatInputFreq = (hz: number) => {
+  const unit = pickDisplayUnit(hz);
+  const factor = unitFactor(unit);
+  const value = hz / factor;
+  const precision = unit === 'Hz' ? 0 : 3;
+  return `${value.toFixed(precision)} ${unit}`;
+};
+
+const chooseSampleRate = (requiredBandwidth: number) => {
+  const stepped = Math.ceil(requiredBandwidth / sampleRateStepHz) * sampleRateStepHz;
   return Math.max(minHackRFSampleRate, Math.min(maxHackRFSampleRate, stepped));
 };
 
-const clampTargetIntoView = () => {
-  const minHz = Math.max(minTuneFreqHz, displayMinFreq.value);
-  const maxHz = Math.max(minHz, displayMaxFreq.value);
-  if (targetFreq.value < minHz) targetFreq.value = minHz;
-  if (targetFreq.value > maxHz) targetFreq.value = maxHz;
-};
+const normalizeTuning = () => {
+  if (targetFreq.value < minTuneFreqHz) targetFreq.value = minTuneFreqHz;
+  if (spanHz.value < minDisplayBandwidthHz) spanHz.value = minDisplayBandwidthHz;
+  if (spanHz.value > maxSpanHz) spanHz.value = maxSpanHz;
 
-const chooseRfCenterForTarget = () => {
-  const candidates = [
-    targetFreq.value - forcedTargetOffsetHz,
-    targetFreq.value + forcedTargetOffsetHz,
-  ].filter((hz) => hz >= minTuneFreqHz);
-
-  if (candidates.length === 0) {
-    return minTuneFreqHz;
-  }
-
-  return candidates.reduce((best, cur) =>
-    Math.abs(cur - viewCenterFreq.value) < Math.abs(best - viewCenterFreq.value) ? cur : best
-  );
-};
-
-const normalizeViewRange = () => {
-  if (viewCenterFreq.value < minTuneFreqHz) viewCenterFreq.value = minTuneFreqHz;
-  if (viewBandwidthHz.value < minDisplayBandwidthHz) viewBandwidthHz.value = minDisplayBandwidthHz;
-  if (viewBandwidthHz.value > maxDisplayBandwidthHz) viewBandwidthHz.value = maxDisplayBandwidthHz;
-  clampTargetIntoView();
-  rfCenterFreq.value = chooseRfCenterForTarget();
-
-  const requiredUsable =
-    viewBandwidthHz.value + 2 * Math.abs(viewCenterFreq.value - rfCenterFreq.value);
-  rxSampleRate.value = chooseSampleRate(requiredUsable);
+  const requiredBandwidth =
+    spanHz.value + 2 * Math.abs(viewCenterFreq.value - rfCenterFreq.value);
+  rxSampleRate.value = chooseSampleRate(requiredBandwidth);
 };
 
 const restartRx = async () => {
@@ -327,25 +312,39 @@ const restartRx = async () => {
   await start();
 };
 
-const onViewRangeChange = async () => {
-  normalizeViewRange();
+const onTuneChange = async () => {
+  normalizeTuning();
   await restartRx();
 };
 
-const onTargetFreqChange = async () => {
-  normalizeViewRange();
-  await restartRx();
+const openKeypad = (field: KeypadField) => {
+  keypadField.value = field;
+  keypadOpenToken.value += 1;
 };
 
-normalizeViewRange();
+const closeKeypad = () => {
+  keypadField.value = null;
+};
+
+const onKeypadSubmit = async (valueHz: number) => {
+  const rounded = Math.round(valueHz);
+  if (!Number.isFinite(rounded)) return;
+
+  if (keypadField.value === 'span') {
+    spanHz.value = rounded;
+  } else if (keypadField.value === 'target') {
+    targetFreq.value = rounded;
+  }
+  closeKeypad();
+  await onTuneChange();
+};
+
+normalizeTuning();
 const saveSettings = () => {
   try {
     const data: PersistedSettings = {
-      viewCenterFreq: viewCenterFreq.value,
-      viewBandwidthHz: viewBandwidthHz.value,
+      spanHz: spanHz.value,
       targetFreq: targetFreq.value,
-      ifMinHz: ifMinHz.value,
-      ifMaxHz: ifMaxHz.value,
       dcCancelEnabled: dcCancelEnabled.value,
       fftUseProcessed: fftUseProcessed.value,
       ampEnabled: options.ampEnabled,
@@ -391,30 +390,8 @@ const computeFftViewWindow = (fftSize: number) => {
   };
 };
 
-const onIfBandChange = async () => {
-  if (ifMinHz.value < 0) ifMinHz.value = 0;
-  if (ifMaxHz.value <= ifMinHz.value) {
-    ifMaxHz.value = ifMinHz.value + 100;
-  }
-
-  if (backend && running.value) {
-    await backend.setIfBand(ifMinHz.value, ifMaxHz.value);
-  }
-};
-
-/// モード名に対応するデフォルトの IF Max を返す
-const defaultIfMaxHzForMode = (mode: string): number => {
-  // FM: 75kHz（demod_rate=200kHz のナイキスト100kHz に対して遷移帯域25kHz を確保）
-  return mode === 'FM' ? 75_000 : 4_500;
-};
-
 const onDemodModeChange = async () => {
-  // IFフィルタをモードに応じて自動更新
-  ifMaxHz.value = defaultIfMaxHzForMode(demodMode.value);
-  ifMinHz.value = 0;
-
   if (backend && running.value) {
-    // フィルタ幅が大きく変わるため再起動
     await restartRx();
   }
 };
@@ -510,7 +487,7 @@ const stopAudio = () => {
 const start = async () => {
   if (!connected.value) return;
 
-  normalizeViewRange();
+  normalizeTuning();
   await initAudio();
 
   if (!fftCanvas.value || !waterfallCanvas.value) {
@@ -569,7 +546,7 @@ const start = async () => {
       // targetFreq (NCOオフセット位置) に赤い線を引く
       const targetHz = targetFreq.value;
       const startHz = displayMinFreq.value;
-      const widthHz = viewBandwidthHz.value;
+      const widthHz = spanHz.value;
       
       const ratio = Math.min(1, Math.max(0, (targetHz - startHz) / widthHz));
       const x = canvasFft.width * ratio;
@@ -624,11 +601,8 @@ watch(() => fftUseProcessed.value, (val) => {
 });
 watch(
   [
-    viewCenterFreq,
-    viewBandwidthHz,
+    spanHz,
     targetFreq,
-    ifMinHz,
-    ifMaxHz,
     dcCancelEnabled,
     fftUseProcessed,
     demodMode,
@@ -772,6 +746,22 @@ body, #app {
 	border-color: #2196f3;
 }
 
+.field-input-btn {
+	width: 100%;
+	padding: 8px 12px;
+	border: 1px solid #444;
+	border-radius: 4px;
+	background: #222;
+	color: #fff;
+	font-size: 14px;
+	text-align: left;
+	cursor: pointer;
+}
+
+.field-input-btn:hover {
+	border-color: #666;
+}
+
 .field-input .field-range {
 	flex: 2;
 	margin-right: 8px;
@@ -856,5 +846,42 @@ body, #app {
 	border-left: none;
 	border-right: 2px solid #f33;
 	transform: translateX(-100%);
+}
+
+.dialog-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(0, 0, 0, 0.55);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	z-index: 1100;
+	padding: 12px;
+	box-sizing: border-box;
+}
+
+.dialog {
+	background: #f9f9f9;
+	color: #222;
+	border-radius: 8px;
+	overflow: hidden;
+	box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.dialog-title {
+	padding: 12px 16px;
+	font-weight: 600;
+	border-bottom: 1px solid #ddd;
+}
+
+.dialog-content {
+	padding: 12px 16px;
+}
+
+.dialog-actions {
+	display: flex;
+	justify-content: flex-end;
+	padding: 12px 16px;
+	border-top: 1px solid #ddd;
 }
 </style>
