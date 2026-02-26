@@ -110,13 +110,14 @@ impl DecimationFilter {
     }
 
     /// ブロック単位でのフィルタリングとデシメーション
-    /// 入力された配列から 1/M に長さを縮小した出力配列を返す
-    pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<Complex<f32>> {
+    /// 入力された配列から 1/M に長さを縮小した出力配列を `output` に書き込む
+    pub fn process_into(&mut self, input: &[Complex<f32>], output: &mut Vec<Complex<f32>>) {
+        output.clear();
         if input.is_empty() {
-            return Vec::new();
+            return;
         }
 
-        let mut output = Vec::with_capacity(input.len() / self.factor + 1);
+        output.reserve(input.len() / self.factor + 1);
 
         // 前ブロックからの位相ずれを維持し、ブロック境界でも等間隔で間引く。
         let mut current_idx = if self.phase == 0 {
@@ -147,7 +148,7 @@ impl DecimationFilter {
         // history の更新 (次回の入力を考慮して末尾タップ-1個を保存)
         let hist_len = self.history.len();
         if hist_len == 0 {
-            return output;
+            return;
         }
 
         if input.len() >= hist_len {
@@ -159,6 +160,14 @@ impl DecimationFilter {
             self.history[hist_len - shift..].copy_from_slice(input);
         }
 
+    }
+
+    /// ブロック単位でのフィルタリングとデシメーション
+    /// 入力された配列から 1/M に長さを縮小した出力配列を返す
+    #[allow(dead_code)]
+    pub fn process(&mut self, input: &[Complex<f32>]) -> Vec<Complex<f32>> {
+        let mut output = Vec::with_capacity(input.len() / self.factor + 1);
+        self.process_into(input, &mut output);
         output
     }
 }

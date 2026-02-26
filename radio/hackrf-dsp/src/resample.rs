@@ -7,6 +7,7 @@ pub struct Resampler {
     taps_per_phase: usize,
     coeffs: Vec<Vec<f32>>,
     history: Vec<f32>,
+    scratch: Vec<f32>,
 }
 
 impl Resampler {
@@ -69,6 +70,7 @@ impl Resampler {
             taps_per_phase,
             coeffs,
             history: vec![0.0; taps_per_phase - 1],
+            scratch: Vec::new(),
         }
     }
 
@@ -80,9 +82,11 @@ impl Resampler {
         let prefix_len = self.history.len();
 
         // 履歴 + 入力
-        let mut buffer = Vec::with_capacity(prefix_len + input.len());
-        buffer.extend_from_slice(&self.history);
-        buffer.extend_from_slice(input);
+        self.scratch.clear();
+        self.scratch.reserve(prefix_len + input.len());
+        self.scratch.extend_from_slice(&self.history);
+        self.scratch.extend_from_slice(input);
+        let buffer = &self.scratch;
 
         let center = (self.taps_per_phase as isize - 1) / 2;
         // 未来サンプルが必要な範囲（phase >= len - center）は次チャンクへ持ち越す。

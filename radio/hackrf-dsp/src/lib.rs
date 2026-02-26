@@ -6,6 +6,8 @@ mod demod;
 mod fft;
 mod filter;
 mod resample;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod bench;
 
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
@@ -110,6 +112,8 @@ pub struct Receiver {
 
     // 中間バッファ（アロケーションを避けるため保持）
     baseband_buffer: Vec<Complex<f32>>,
+    coarse_buffer: Vec<Complex<f32>>,
+    demod_iq_buffer: Vec<Complex<f32>>,
     demod_buffer: Vec<f32>,
     audio_buffer: Vec<f32>,
     fft_buffer: Vec<f32>,
@@ -257,6 +261,8 @@ impl Receiver {
             resampler,
             fft: FFT::new(fft_size, &window),
             baseband_buffer: Vec::with_capacity(131_072),
+            coarse_buffer: Vec::with_capacity(131_072),
+            demod_iq_buffer: Vec::with_capacity(131_072),
             demod_buffer: Vec::with_capacity(8_192),
             audio_buffer: Vec::with_capacity(8_192),
             fft_buffer: vec![0.0; fft_size],
@@ -330,14 +336,20 @@ impl Receiver {
         }
 
         // デシメーション (粗段: rx->1Msps, 固定段: 1Msps->demod_rate)
-        let coarse_decimated = self.coarse_filter.process(&self.baseband_buffer);
-        let demod_iq = self.demod_filter.process(&coarse_decimated);
+        self.coarse_filter
+            .process_into(&self.baseband_buffer, &mut self.coarse_buffer);
+        self.demod_filter
+            .process_into(&self.coarse_buffer, &mut self.demod_iq_buffer);
 
         // 復調（モードに応じて分岐）
-        self.demod_buffer.resize(demod_iq.len(), 0.0);
+        self.demod_buffer.resize(self.demod_iq_buffer.len(), 0.0);
         match self.mode {
-            DemodMode::Am => self.am_demod.demodulate(&demod_iq, &mut self.demod_buffer),
-            DemodMode::Fm => self.fm_demod.demodulate(&demod_iq, &mut self.demod_buffer),
+            DemodMode::Am => self
+                .am_demod
+                .demodulate(&self.demod_iq_buffer, &mut self.demod_buffer),
+            DemodMode::Fm => self
+                .fm_demod
+                .demodulate(&self.demod_iq_buffer, &mut self.demod_buffer),
         }
 
         // リサンプリング (demod_rate -> audioCtx.sampleRate)
@@ -358,7 +370,11 @@ impl Receiver {
                 // NCO後のDC成分（信号がDCにあるか検証）
                 let bb_dc = self.baseband_buffer.iter().sum::<Complex<f32>>()
                     / self.baseband_buffer.len().max(1) as f32;
-                let dec_peak = demod_iq.iter().map(|s| s.norm()).fold(0.0f32, f32::max);
+                let dec_peak = self
+                    .demod_iq_buffer
+                    .iter()
+                    .map(|s| s.norm())
+                    .fold(0.0f32, f32::max);
                 let demod_peak = self
                     .demod_buffer
                     .iter()
