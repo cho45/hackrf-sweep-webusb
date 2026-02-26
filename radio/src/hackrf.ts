@@ -455,12 +455,20 @@ class HackRF {
 			await Promise.resolve();
 			while (this.rxRunning) {
 				if (!this.device) break;
-				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-				const data = result.data;
-				if (result.status !== 'ok' || !data) {
-					throw 'failed to get transfer';
+				try {
+					const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
+					const data = result.data;
+					if (result.status !== 'ok' || !data) {
+						throw new Error('failed to get transfer');
+					}
+					if (!this.rxRunning) break;
+					// transferIn が返す DataView は非ゼロ offset の場合がある
+					callback(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+				} catch (e) {
+					// transfer loop の例外は stop/start 回復経路を壊さないよう局所化する
+					console.error('rx transfer error', e);
+					break;
 				}
-				callback(new Uint8Array(data.buffer, 0, data.byteLength));
 			}
 			console.log('rx transfer ended (rx)');
 		};
@@ -479,12 +487,18 @@ class HackRF {
 			await Promise.resolve();
 			while (this.rxRunning) {
 				if (!this.device) break;
-				const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
-				const data = result.data;
-				if (result.status !== 'ok' || !data) {
-					throw 'failed to get transfer';
+				try {
+					const result = await this.device.transferIn(1, HackRF.TRANSFER_BUFFER_SIZE);
+					const data = result.data;
+					if (result.status !== 'ok' || !data) {
+						throw new Error('failed to get transfer');
+					}
+					if (!this.rxRunning) break;
+					callback(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+				} catch (e) {
+					console.error('rx sweep transfer error', e);
+					break;
 				}
-				callback(new Uint8Array(data.buffer, 0, data.byteLength));
 			}
 			console.log('rx transfer ended (rx sweep)');
 		};
@@ -577,15 +591,21 @@ class HackRF {
 	}
 
 	async stopRx() {
+		let hadRejectedTransfer = false;
+
 		if (this.rxRunning) {
 			console.log('stopRx waiting');
 			const promises = this.rxRunning;
 			console.log(promises);
 			this.rxRunning = null;
-			await Promise.all(promises);
+			const results = await Promise.allSettled(promises);
+			hadRejectedTransfer = results.some((r) => r.status === 'rejected');
 		}
 		console.log('stopRx');
 		await this.setTransceiverMode(HackRF.HACKRF_TRANSCEIVER_MODE_OFF);
+		if (hadRejectedTransfer) {
+			console.warn('stopRx completed with rejected transfer(s)');
+		}
 	}
 
 	async stopTx() {
@@ -606,5 +626,3 @@ class HackRF {
 }
 
 export { HackRF };
-
-

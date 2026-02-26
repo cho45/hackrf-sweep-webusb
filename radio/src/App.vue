@@ -575,6 +575,10 @@ const start = async () => {
     ifMaxHz: ifMaxHz.value,
     dcCancelEnabled: dcCancelEnabled.value,
     fftUseProcessed: fftUseProcessed.value,
+    ampEnabled: options.ampEnabled,
+    antennaEnabled: options.antennaEnabled,
+    lnaGain: options.lnaGain,
+    vgaGain: options.vgaGain,
   }, onData);
 
   running.value = true;
