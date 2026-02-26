@@ -2,6 +2,7 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
     this.queue = [];
+    this.inputPort = null;
     this.bufferedSamples = 0;
     this.started = false;
     this.bufferLength = 128;
@@ -27,8 +28,7 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
     this.underrunCount = 0;
     this.lastStatsAt = currentTime;
 
-    this.port.onmessage = (event) => {
-      const msg = event.data;
+    this.handleMessage = (msg) => {
       if (!msg || typeof msg !== 'object') return;
 
       if (msg.type === 'push') {
@@ -56,6 +56,26 @@ class AudioStreamProcessor extends AudioWorkletProcessor {
         this.recomputeBufferTargets();
         this.lastBufferGrowAt = -1;
         this.lastStatsAt = currentTime;
+      }
+    };
+
+    this.port.onmessage = (event) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object') return;
+      if (
+        msg.type === 'attach-input-port' &&
+        msg.port &&
+        typeof msg.port.postMessage === 'function'
+      ) {
+        if (this.inputPort) {
+          this.inputPort.close();
+        }
+        this.inputPort = msg.port;
+        this.inputPort.onmessage = (e) => this.handleMessage(e.data);
+        if (typeof this.inputPort.start === 'function') {
+          this.inputPort.start();
+        }
+        return;
       }
     };
   }

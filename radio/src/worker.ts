@@ -96,6 +96,7 @@ export class RadioBackend {
 	receiver?: InstanceType<ReceiverCtor>;
 	wasmModule?: any;
 	private wasmBindings?: WasmBindings;
+	private audioPort?: MessagePort;
 	private ampEnabled = false;
 	private antennaEnabled = false;
 	private lnaGain = 16;
@@ -186,6 +187,20 @@ export class RadioBackend {
 		if (this.device) await this.device.setFreq(centerFreq);
 	}
 
+	async setAudioPort(port: MessagePort) {
+		if (this.audioPort) {
+			try {
+				this.audioPort.close();
+			} catch (_e) {
+				// no-op
+			}
+		}
+		this.audioPort = port;
+		if (typeof this.audioPort.start === "function") {
+			this.audioPort.start();
+		}
+	}
+
 	async startRx(
 		options: {
 			sampleRate: number;
@@ -201,10 +216,10 @@ export class RadioBackend {
 			dcCancelEnabled: boolean;
 			ampEnabled: boolean;
 			antennaEnabled: boolean;
-			lnaGain: number;
-			vgaGain: number;
-		},
-		onData: (audioOut: Float32Array, audioLen: number, fftOut: Float32Array, perf?: PerfStats) => void
+				lnaGain: number;
+				vgaGain: number;
+			},
+			onData: (fftOut: Float32Array, perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 		await this.ensureWasm();
@@ -288,8 +303,7 @@ export class RadioBackend {
 			fftReadView = new Float32Array(memoryBuffer, fftPtr, fftCapacity);
 		};
 
-		const audioScratch = new Float32Array(audioOutCapacity);
-		const fftScratch = new Float32Array(fftCapacity);
+			const fftScratch = new Float32Array(fftCapacity);
 
 		let perfWindowStart = performance.now();
 		let lastBlockAt = performance.now();
@@ -372,18 +386,25 @@ export class RadioBackend {
 			if (processMs > processMsMax) {
 				processMsMax = processMs;
 			}
-			if (audioLen >= 0) {
-				if (audioLen > 0) {
-					audioScratch.set(audioReadView.subarray(0, audioLen), 0);
-				}
-				fftScratch.set(fftReadView);
-				audioSamplesOut += audioLen;
-				const callbackStart = performance.now();
-				const perf = snapshotPerf(callbackStart);
-				onData(audioScratch, audioLen, fftScratch, perf);
-				const callbackMs = performance.now() - callbackStart;
-				callbackMsSum += callbackMs;
-				if (callbackMs > callbackMsMax) {
+				if (audioLen >= 0) {
+					if (audioLen > 0) {
+						if (this.audioPort) {
+							const audioChunk = new Float32Array(audioLen);
+							audioChunk.set(audioReadView.subarray(0, audioLen));
+							this.audioPort.postMessage(
+								{ type: "push", data: audioChunk },
+								[audioChunk.buffer]
+							);
+						}
+					}
+					fftScratch.set(fftReadView);
+					audioSamplesOut += audioLen;
+					const callbackStart = performance.now();
+					const perf = snapshotPerf(callbackStart);
+					onData(fftScratch, perf);
+					const callbackMs = performance.now() - callbackStart;
+					callbackMsSum += callbackMs;
+					if (callbackMs > callbackMsMax) {
 					callbackMsMax = callbackMs;
 				}
 			}
@@ -393,6 +414,13 @@ export class RadioBackend {
 	async stopRx() {
 		if (this.device) {
 			await this.device.stopRx();
+		}
+		if (this.audioPort) {
+			try {
+				this.audioPort.postMessage({ type: "reset" });
+			} catch (_e) {
+				// no-op
+			}
 		}
 		if (this.receiver) {
 			this.receiver.free_io_buffers();

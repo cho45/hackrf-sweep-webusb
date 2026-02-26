@@ -541,20 +541,7 @@ const initAudio = async () => {
   await audioCtx.resume();
 };
 
-const playAudioBuffer = (data: Float32Array, length: number) => {
-  if (!audioNode) return;
-  const safeLength = Math.max(0, Math.min(length, data.length));
-  if (safeLength === 0) return;
-  // WASMメモリ再利用の影響を避けるため、明示的にコピーしてからWorkletへ渡す。
-  const chunk = new Float32Array(safeLength);
-  chunk.set(data.subarray(0, safeLength));
-  audioNode.port.postMessage({ type: 'push', data: chunk }, [chunk.buffer]);
-};
-
 const stopAudio = () => {
-  if (audioNode) {
-    audioNode.port.postMessage({ type: 'reset' });
-  }
   if (audioCtx) {
     void audioCtx.suspend();
   }
@@ -687,9 +674,12 @@ const start = async () => {
     new Waterfall(canvasWf, fftVisibleBins, 256);
   startRenderLoop(canvasFftCtx, canvasFft);
 
+  const channel = new MessageChannel();
+  audioNode!.port.postMessage({ type: 'attach-input-port', port: channel.port1 }, [channel.port1]);
+  await backend.setAudioPort(Comlink.transfer(channel.port2, [channel.port2]));
+
   // Comlinkのコールバック関数は proxy に包む必要がある
-  const onData = Comlink.proxy((audioOut: Float32Array, audioLen: number, fftOut: Float32Array, perf?: DspPerfStats) => {
-    playAudioBuffer(audioOut, audioLen);
+  const onData = Comlink.proxy((fftOut: Float32Array, perf?: DspPerfStats) => {
     if (!latestFftFrame || latestFftFrame.length !== fftOut.length) {
       latestFftFrame = new Float32Array(fftOut.length);
     }
