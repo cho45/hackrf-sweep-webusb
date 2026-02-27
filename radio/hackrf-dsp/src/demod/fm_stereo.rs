@@ -30,6 +30,8 @@ const PLL_UPDATE_INTERVAL: usize = 2;
 const LR_PHASE_TRACK_LPF_HZ: f32 = 25.0;
 const LR_PHASE_TRACK_UPDATE_INTERVAL: usize = 8;
 const PILOT_SIDE_UPDATE_INTERVAL: usize = 4;
+const HIGH_BLEND_CUTOFF_WEAK_HZ: f32 = 2_500.0;
+const HIGH_BLEND_CUTOFF_STRONG_HZ: f32 = 15_000.0;
 
 /// FM MPX から L/R を復元するステレオデコーダ。
 ///
@@ -69,6 +71,8 @@ struct FMStereoConfig {
     blend_attack_alpha: f32,
     blend_release_alpha: f32,
     lr_phase_track_alpha: f32,
+    high_blend_alpha_weak: f32,
+    high_blend_alpha_strong: f32,
     deemphasis_alpha: Option<f32>,
     pilot_lock_low: f32,
     pilot_lock_high: f32,
@@ -136,6 +140,7 @@ struct LrState {
 struct AudioState {
     deemphasis_l: f32,
     deemphasis_r: f32,
+    high_blend_state: f32,
 }
 
 #[derive(Default)]
@@ -190,6 +195,8 @@ impl FMStereoConfig {
             blend_attack_alpha: alpha_from_tau(sample_rate_hz, 0.03),
             blend_release_alpha: alpha_from_tau(sample_rate_hz, 0.20),
             lr_phase_track_alpha: alpha_from_cutoff(sample_rate_hz, LR_PHASE_TRACK_LPF_HZ),
+            high_blend_alpha_weak: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_WEAK_HZ),
+            high_blend_alpha_strong: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_STRONG_HZ),
             deemphasis_alpha,
             pilot_lock_low: 0.010,
             pilot_lock_high: 0.030,
@@ -292,6 +299,7 @@ impl AudioState {
     fn reset(&mut self) {
         self.deemphasis_l = 0.0;
         self.deemphasis_r = 0.0;
+        self.high_blend_state = 0.0;
     }
 }
 
@@ -506,10 +514,19 @@ impl FMStereoDecoder {
         (sum, lr_aligned)
     }
 
-    /// L/R合成後、必要ならdeemphasisを適用する。
+    /// High-blend + L/R合成 + deemphasis。
+    ///
+    /// High-blend: 信号品質に応じて L-R の高域を抑圧する。
+    /// - stereo_blend ≈ 1（強い信号）: LPF カットオフ ≈ 15 kHz → ほぼ透過
+    /// - stereo_blend ≈ 0（弱い信号）: LPF カットオフ ≈ 2.5 kHz → 高域ノイズ大幅抑圧
     #[inline(always)]
     fn mix_and_postprocess(&mut self, sum: f32, lr_aligned: f32) -> (f32, f32) {
-        let lr = lr_aligned * self.blend.stereo_blend;
+        let hb_alpha = self.cfg.high_blend_alpha_weak
+            + (self.cfg.high_blend_alpha_strong - self.cfg.high_blend_alpha_weak)
+                * self.blend.stereo_blend;
+        self.audio.high_blend_state +=
+            hb_alpha * (lr_aligned - self.audio.high_blend_state);
+        let lr = self.audio.high_blend_state * self.blend.stereo_blend;
         let mut l = sum + lr;
         let mut r = sum - lr;
 
