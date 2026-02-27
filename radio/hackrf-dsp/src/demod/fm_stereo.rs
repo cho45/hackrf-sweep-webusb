@@ -66,6 +66,8 @@ pub struct FMStereoDecoder {
     pll_freq_corr: f32,
     pll_freq_corr_max: f32,
     pll_update_countdown: usize,
+    pll_mix_cos2err: f32,
+    pll_mix_sin2err: f32,
 
     dc_prev_x: f32,
     dc_prev_y: f32,
@@ -184,6 +186,8 @@ impl FMStereoDecoder {
             pll_freq_corr: 0.0,
             pll_freq_corr_max,
             pll_update_countdown: 0,
+            pll_mix_cos2err: 1.0,
+            pll_mix_sin2err: 0.0,
             dc_prev_x: 0.0,
             dc_prev_y: 0.0,
             dc_hp_a,
@@ -242,6 +246,8 @@ impl FMStereoDecoder {
         self.pilot_phase_err_last = 0.0;
         self.pll_freq_corr = 0.0;
         self.pll_update_countdown = 0;
+        self.pll_mix_cos2err = 1.0;
+        self.pll_mix_sin2err = 0.0;
         self.pilot_side_update_countdown = 0;
         self.dc_prev_x = 0.0;
         self.dc_prev_y = 0.0;
@@ -310,6 +316,9 @@ impl FMStereoDecoder {
             if self.pll_update_countdown == 0 {
                 let pilot_phase_err = pilot_phase_error_from_iq(self.pilot_i_lp, self.pilot_q_lp);
                 self.pilot_phase_err_last = pilot_phase_err;
+                let (sin2err, cos2err) = (2.0 * pilot_phase_err).sin_cos();
+                self.pll_mix_cos2err = cos2err;
+                self.pll_mix_sin2err = sin2err;
                 // 2次PLL: 位相誤差でNCOの周波数補正を更新し、狭帯域で安定追従させる。
                 self.pll_freq_corr = (self.pll_freq_corr + self.pll_ki * pilot_phase_err)
                     .clamp(-self.pll_freq_corr_max, self.pll_freq_corr_max);
@@ -318,7 +327,6 @@ impl FMStereoDecoder {
                 self.pll_update_countdown -= 1;
             }
             let pilot_phase_err = self.pilot_phase_err_last;
-            let pilot_phase_locked = self.pilot_phase + pilot_phase_err;
             let pilot_coherent_power =
                 self.pilot_i_lp * self.pilot_i_lp + self.pilot_q_lp * self.pilot_q_lp;
             let pilot_side_power = 0.5
@@ -365,7 +373,10 @@ impl FMStereoDecoder {
             // - 入力: 38±15kHz の帯域（23..53kHz）
             // - 同期検波後: 0..15kHz (+ 2*38k 近傍の高域項)
             // - 後段LPFで 0..15kHz を取り出す
-            let (s38, c38) = (2.0 * pilot_phase_locked).sin_cos();
+            let cos2phi = c19 * c19 - s19 * s19;
+            let sin2phi = 2.0 * s19 * c19;
+            let c38 = cos2phi * self.pll_mix_cos2err - sin2phi * self.pll_mix_sin2err;
+            let s38 = sin2phi * self.pll_mix_cos2err + cos2phi * self.pll_mix_sin2err;
             let lr_i_raw = 2.0 * x * c38;
             let lr_q_raw = -2.0 * x * s38;
 
