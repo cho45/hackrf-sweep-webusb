@@ -1,12 +1,10 @@
 #![deny(warnings)]
 #![deny(clippy::all)]
 
-mod demod;
+pub mod demod;
 mod fft;
 mod filter;
 mod resample;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod bench;
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use std::arch::wasm32::{

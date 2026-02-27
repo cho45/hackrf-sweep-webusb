@@ -19,8 +19,24 @@ js-sys = "0.3.87"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "receiver_criterion"
+harness = false
+
+[[bench]]
+name = "fm_stereo_criterion"
+harness = false
 
 [profile.release]
 opt-level = "z"
 lto = true
 codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = false
+incremental = true

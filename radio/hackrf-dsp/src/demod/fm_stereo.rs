@@ -24,7 +24,7 @@ const LR_PHASE_TRACK_LPF_HZ: f32 = 25.0;
 const LR_PHASE_TRACK_UPDATE_INTERVAL: usize = 8;
 const PILOT_SIDE_UPDATE_INTERVAL: usize = 4;
 
-/// FM MPX から L/R を復元する簡易ステレオデコーダ。
+/// FM MPX から L/R を復元するステレオデコーダ。
 ///
 /// MPX の周波数配置（FM復調後）:
 /// - 0..15kHz: `L+R`（モノラル成分）
@@ -500,6 +500,28 @@ mod tests {
         mpx
     }
 
+    fn build_stereo_mpx_with_lr_phase_mismatch(
+        fs: f32,
+        left: &[f32],
+        right: &[f32],
+        pilot_phase: f32,
+        lr_extra_phase: f32,
+    ) -> Vec<f32> {
+        assert_eq!(left.len(), right.len());
+        let mut mpx = Vec::with_capacity(left.len());
+        for i in 0..left.len() {
+            let t = i as f32 / fs;
+            let lp = left[i] + right[i];
+            let lr = left[i] - right[i];
+            let pilot = 0.10 * (2.0 * std::f32::consts::PI * 19_000.0 * t + pilot_phase).cos();
+            let dsb = lr
+                * (2.0 * std::f32::consts::PI * 38_000.0 * t + 2.0 * pilot_phase + lr_extra_phase)
+                    .cos();
+            mpx.push(0.45 * lp + pilot + 0.45 * dsb);
+        }
+        mpx
+    }
+
     fn build_program_signal(fs: f32, len: usize, freqs_hz: &[f32]) -> Vec<f32> {
         let mut out = vec![0.0f32; len];
         for (k, &f) in freqs_hz.iter().enumerate() {
@@ -576,6 +598,21 @@ mod tests {
         let num = main.abs().max(1e-9);
         let den = leak.abs().max(1e-9);
         20.0 * (num / den).log10()
+    }
+
+    fn tone_amp(signal: &[f32], fs_hz: f32, freq_hz: f32) -> f32 {
+        if signal.is_empty() {
+            return 0.0;
+        }
+        let w = 2.0 * std::f32::consts::PI * freq_hz / fs_hz;
+        let mut re = 0.0f32;
+        let mut im = 0.0f32;
+        for (n, &x) in signal.iter().enumerate() {
+            let phi = w * n as f32;
+            re += x * phi.cos();
+            im -= x * phi.sin();
+        }
+        (re * re + im * im).sqrt() / signal.len() as f32
     }
 
     #[test]
@@ -772,6 +809,64 @@ mod tests {
             st.stereo_blend
         );
         assert!(st.stereo_locked, "stereo did not lock");
+    }
+
+    #[test]
+    fn lr_phase_mismatch_keeps_separation_and_level() {
+        let fs = 200_000.0f32;
+        let n = 260_000usize;
+        let tone_hz = 1_000.0f32;
+        let pilot_phase = 0.7f32;
+        let lr_extra_phase = 1.1f32; // 約63度。I経路のみだと大きく減衰するケース。
+
+        let mut left_src = vec![0.0f32; n];
+        let right_src = vec![0.0f32; n];
+        for i in 0..n {
+            let t = i as f32 / fs;
+            left_src[i] = 0.6 * (2.0 * std::f32::consts::PI * tone_hz * t).sin();
+        }
+
+        let mpx_ref = build_stereo_mpx_from_program_with_phase(fs, &left_src, &right_src, pilot_phase);
+        let mpx_mismatch = build_stereo_mpx_with_lr_phase_mismatch(
+            fs,
+            &left_src,
+            &right_src,
+            pilot_phase,
+            lr_extra_phase,
+        );
+
+        let mut dec = FMStereoDecoder::new(fs, None);
+        let mut l_ref = Vec::new();
+        let mut r_ref = Vec::new();
+        dec.process(&mpx_ref, &mut l_ref, &mut r_ref);
+
+        dec.reset();
+        let mut l_mis = Vec::new();
+        let mut r_mis = Vec::new();
+        dec.process(&mpx_mismatch, &mut l_mis, &mut r_mis);
+
+        let skip = 40_000usize;
+        let l_ref_amp = tone_amp(&l_ref[skip..], fs, tone_hz);
+        let l_mis_amp = tone_amp(&l_mis[skip..], fs, tone_hz);
+        let r_mis_amp = tone_amp(&r_mis[skip..], fs, tone_hz);
+
+        let rel = l_mis_amp / (l_ref_amp + 1e-9);
+        let sep_db = ratio_db(l_mis_amp, r_mis_amp);
+
+        assert!(
+            rel > 0.75,
+            "LR phase mismatch attenuated too much: rel={} l_ref={} l_mis={}",
+            rel,
+            l_ref_amp,
+            l_mis_amp
+        );
+        assert!(
+            sep_db > 12.0,
+            "LR phase mismatch separation too low: sep_db={} l_mis={} r_mis={}",
+            sep_db,
+            l_mis_amp,
+            r_mis_amp
+        );
     }
 
     #[test]
