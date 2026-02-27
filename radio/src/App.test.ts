@@ -33,15 +33,16 @@ vi.mock('comlink', () => ({
 			setLnaGain = vi.fn(async () => {});
 			setAmpEnable = vi.fn(async () => {});
 			setAntennaEnable = vi.fn(async () => {});
-				setAudioPort = vi.fn(async () => {});
-				startRx = vi.fn(async () => {});
-				stopRx = vi.fn(async () => {});
-				close = vi.fn(async () => {});
-				setDcCancelEnabled = vi.fn(async () => {});
-				setFmStereoEnabled = vi.fn(async () => {});
-				constructor() {
-					hoisted.backendInstances.push(this);
-				}
+			setAudioPort = vi.fn(async () => {});
+			setFftPort = vi.fn(async () => {});
+			startRx = vi.fn(async () => {});
+			stopRx = vi.fn(async () => {});
+			close = vi.fn(async () => {});
+			setDcCancelEnabled = vi.fn(async () => {});
+			setFmStereoEnabled = vi.fn(async () => {});
+			constructor() {
+				hoisted.backendInstances.push(this);
+			}
 		};
 	},
 	proxy: (v: any) => v,
@@ -168,7 +169,7 @@ describe('App.vue', () => {
 		expect(wrapper.find('.keypad-display .unit').text()).toBe('MHz');
 	});
 
-	it('wires audio port to backend on start', async () => {
+	it('wires audio/fft ports to backend on start', async () => {
 		const requestDeviceSpy = vi.spyOn(navigator.usb, 'requestDevice').mockResolvedValue({
 			vendorId: 0x1d50,
 			productId: 0x6089,
@@ -185,6 +186,7 @@ describe('App.vue', () => {
 		expect(hoisted.backendInstances.length).toBeGreaterThan(0);
 		const backend = hoisted.backendInstances[0];
 		expect(backend.setAudioPort).toHaveBeenCalledTimes(1);
+		expect(backend.setFftPort).toHaveBeenCalledTimes(1);
 		expect(backend.startRx).toHaveBeenCalledTimes(1);
 
 		requestDeviceSpy.mockRestore();

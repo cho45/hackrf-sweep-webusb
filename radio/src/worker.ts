@@ -107,8 +107,9 @@ const UI_FFT_PUSH_FPS = 30;
 const UI_FFT_PUSH_INTERVAL_MS = 1000 / UI_FFT_PUSH_FPS;
 const AUDIO_PACKET_MS = 20;
 const AUDIO_PACKET_POOL = 48;
+const FFT_PACKET_POOL = 8;
 
-type AudioPortInboundMessage = {
+type RecyclePortInboundMessage = {
 	type: "recycle";
 	data: Float32Array;
 };
@@ -140,21 +141,23 @@ const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(mi
 
 const computeFftQuality = (
 	fftBins: Float32Array,
-	targetBin: number
+	targetBin: number,
+	visibleBins: number
 ): { targetDb: number; noiseFloorDb: number; snrDb: number } => {
-	if (fftBins.length === 0) {
+	const limitedBins = Math.max(0, Math.min(visibleBins, fftBins.length));
+	if (limitedBins === 0) {
 		return { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
 	}
-	const t = clamp(Math.round(targetBin), 0, fftBins.length - 1);
+	const t = clamp(Math.round(targetBin), 0, limitedBins - 1);
 	let targetDb = -120;
-	const signalStart = clamp(t - FFT_SIGNAL_NEIGHBOR_BINS, 0, fftBins.length - 1);
-	const signalEnd = clamp(t + FFT_SIGNAL_NEIGHBOR_BINS, 0, fftBins.length - 1);
+	const signalStart = clamp(t - FFT_SIGNAL_NEIGHBOR_BINS, 0, limitedBins - 1);
+	const signalEnd = clamp(t + FFT_SIGNAL_NEIGHBOR_BINS, 0, limitedBins - 1);
 	for (let i = signalStart; i <= signalEnd; i += 1) {
 		const v = fftBins[i]!;
 		if (v > targetDb) targetDb = v;
 	}
 
-	const sorted = Array.from(fftBins).sort((a, b) => a - b);
+	const sorted = Array.from(fftBins.subarray(0, limitedBins)).sort((a, b) => a - b);
 	const mid = Math.floor(sorted.length / 2);
 	const noiseFloorDb = sorted.length % 2 === 0
 		? ((sorted[mid - 1] ?? -120) + (sorted[mid] ?? -120)) * 0.5
@@ -192,6 +195,7 @@ export class RadioBackend {
 	wasmModule?: any;
 	private wasmBindings?: WasmBindings;
 	private audioPort?: MessagePort;
+	private fftPort?: MessagePort;
 	private ampEnabled = false;
 	private antennaEnabled = false;
 	private lnaGain = 16;
@@ -209,6 +213,7 @@ export class RadioBackend {
 	private autoGainPromise: Promise<AutoGainResult> | null = null;
 	private autoGainAbortController: AbortController | null = null;
 	private audioPacketSender: RecycleTransferSender | null = null;
+	private fftPacketSender: RecycleTransferSender | null = null;
 
 	private async ensureWasm() {
 		if (!this.wasmBindings) {
@@ -503,7 +508,7 @@ export class RadioBackend {
 		}
 		this.audioPort = port;
 		this.audioPort.onmessage = (event: MessageEvent) => {
-			const msg = event.data as AudioPortInboundMessage | null;
+			const msg = event.data as RecyclePortInboundMessage | null;
 			if (!msg || typeof msg !== "object") return;
 			if (msg.type === "recycle" && msg.data instanceof Float32Array) {
 				this.audioPacketSender?.recycle(msg.data);
@@ -511,6 +516,28 @@ export class RadioBackend {
 		};
 		if (typeof this.audioPort.start === "function") {
 			this.audioPort.start();
+		}
+	}
+
+	async setFftPort(port: MessagePort) {
+		if (this.fftPort) {
+			this.fftPort.onmessage = null;
+			try {
+				this.fftPort.close();
+			} catch (_e) {
+				// no-op
+			}
+		}
+		this.fftPort = port;
+		this.fftPort.onmessage = (event: MessageEvent) => {
+			const msg = event.data as RecyclePortInboundMessage | null;
+			if (!msg || typeof msg !== "object") return;
+			if (msg.type === "recycle" && msg.data instanceof Float32Array) {
+				this.fftPacketSender?.recycle(msg.data);
+			}
+		};
+		if (typeof this.fftPort.start === "function") {
+			this.fftPort.start();
 		}
 	}
 
@@ -533,7 +560,7 @@ export class RadioBackend {
 			lnaGain: number;
 			vgaGain: number;
 		},
-		onData: (fftOut: Float32Array, perf?: PerfStats) => void
+		onData: (perf?: PerfStats) => void
 	) {
 		if (!this.device) throw new Error("device not opened");
 		await this.ensureWasm();
@@ -585,6 +612,8 @@ export class RadioBackend {
 		const packetFrames = Math.max(128, Math.round(options.outputSampleRate * (AUDIO_PACKET_MS / 1000)));
 		const packetSamples = packetFrames * audioChannels;
 		this.audioPacketSender = new RecycleTransferSender(packetSamples, AUDIO_PACKET_POOL);
+		let fftPacketSamples = Math.max(1, options.fftVisibleBins);
+		this.fftPacketSender = new RecycleTransferSender(fftPacketSamples, FFT_PACKET_POOL);
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
 		const blockBudgetMs = (iqSamplesPerBlock / Math.max(1, options.sampleRate)) * 1000;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
@@ -629,7 +658,6 @@ export class RadioBackend {
 			fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
 		};
 
-		let fftScratch = new Float32Array(this.fftVisibleBins);
 		this.latestPerfStats = undefined;
 
 		let perfStarted = false;
@@ -665,7 +693,7 @@ export class RadioBackend {
 			return false;
 		};
 
-		const snapshotPerf = (now: number, fftFrame?: Float32Array): PerfStats | undefined => {
+		const snapshotPerf = (now: number, visibleBins: number): PerfStats | undefined => {
 			if (!perfStarted) return undefined;
 			const windowMs = now - perfWindowStart;
 			if (windowMs < 1000 || blockCount === 0) return undefined;
@@ -676,9 +704,7 @@ export class RadioBackend {
 				demodStatsRaw && typeof demodStatsRaw === "object"
 					? (demodStatsRaw as Record<string, unknown>)
 					: {};
-			const fftQuality = fftFrame
-				? computeFftQuality(fftFrame, this.targetVisibleBin)
-				: { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
+			const fftQuality = computeFftQuality(fftReadView, this.targetVisibleBin, visibleBins);
 			const stats: PerfStats = {
 				droppedIqBlocksCount,
 				blockBudgetMs,
@@ -795,12 +821,23 @@ export class RadioBackend {
 				const perfDue = now - perfWindowStart >= 1000 && blockCount > 0;
 				const shouldPushUi = perfDue || now - lastUiPushAt >= UI_FFT_PUSH_INTERVAL_MS;
 				if (shouldPushUi) {
-					if (fftScratch.length !== visibleBins) {
-						fftScratch = new Float32Array(visibleBins);
+					if (visibleBins !== fftPacketSamples) {
+						fftPacketSamples = visibleBins;
+						this.fftPacketSender = new RecycleTransferSender(fftPacketSamples, FFT_PACKET_POOL);
+						try {
+							this.fftPort?.postMessage({ type: "reset" });
+						} catch (_e) {
+							// no-op
+						}
 					}
-					fftScratch.set(fftReadView.subarray(0, visibleBins));
-					const perf = snapshotPerf(now, fftScratch);
-					onData(fftScratch, perf);
+					this.fftPacketSender?.appendFrom(
+						fftReadView,
+						visibleBins,
+						1,
+						this.fftPort
+					);
+					const perf = snapshotPerf(now, visibleBins);
+					onData(perf);
 					lastUiPushAt = now;
 				}
 			}
@@ -819,8 +856,17 @@ export class RadioBackend {
 				// no-op
 			}
 		}
+		if (this.fftPort) {
+			try {
+				this.fftPort.postMessage({ type: "reset" });
+			} catch (_e) {
+				// no-op
+			}
+		}
 		this.audioPacketSender?.reset();
 		this.audioPacketSender = null;
+		this.fftPacketSender?.reset();
+		this.fftPacketSender = null;
 		if (this.receiver) {
 			this.receiver.free_io_buffers();
 			this.receiver.free();
@@ -868,6 +914,12 @@ export class RadioBackend {
 		this.updateTargetVisibleBin();
 		if (this.receiver) {
 			this.receiver.set_fft_view(startBin, visibleBins);
+			this.fftPacketSender = new RecycleTransferSender(Math.max(1, visibleBins), FFT_PACKET_POOL);
+			try {
+				this.fftPort?.postMessage({ type: "reset" });
+			} catch (_e) {
+				// no-op
+			}
 		}
 	}
 }

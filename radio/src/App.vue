@@ -194,6 +194,7 @@ import { WaterfallGL, Waterfall } from './utils';
 import { HackRF } from './hackrf';
 import Keypad from './components/Keypad.vue';
 import audioWorkletModuleUrl from './audio-stream-processor.ts?worker&url';
+import type { RecycleTransferInputMessage, RecycleTransferRecycleMessage } from './recycle-transfer-bridge';
 
 // comlink 経由でバックエンド(WASM/HackRF処理)をロード
 const WorkerBackend = Comlink.wrap<any>(new Worker(new URL('./worker.ts', import.meta.url), { type: 'module' }));
@@ -381,6 +382,7 @@ let audioCtx: AudioContext | null = null;
 let audioNode: AudioWorkletNode | null = null;
 let audioModuleLoaded = false;
 const audioOutputSampleRate = ref(0);
+let fftInputPort: MessagePort | null = null;
 
 
 const waterfallCanvas = ref<HTMLCanvasElement | null>(null);
@@ -781,6 +783,17 @@ const stopAudio = () => {
   }
 };
 
+const closeFftPort = () => {
+  if (!fftInputPort) return;
+  fftInputPort.onmessage = null;
+  try {
+    fftInputPort.close();
+  } catch {
+    // no-op
+  }
+  fftInputPort = null;
+};
+
 const stopRenderLoop = () => {
   if (renderLoopId !== null) {
     cancelAnimationFrame(renderLoopId);
@@ -926,12 +939,35 @@ const start = async () => {
     audioNode!.port.postMessage({ type: 'attach-input-port', port: channel.port1 }, [channel.port1]);
     await backend.setAudioPort(Comlink.transfer(channel.port2, [channel.port2]));
 
-  // Comlinkのコールバック関数は proxy に包む必要がある
-    const onData = Comlink.proxy((fftOut: Float32Array, perf?: DspPerfStats) => {
-      if (!latestFftFrame || latestFftFrame.length !== fftOut.length) {
-        latestFftFrame = new Float32Array(fftOut.length);
+    closeFftPort();
+    const fftChannel = new MessageChannel();
+    fftInputPort = fftChannel.port1;
+    fftInputPort.onmessage = (event: MessageEvent) => {
+      const msg = event.data as RecycleTransferInputMessage | null;
+      if (!msg || typeof msg !== 'object') return;
+      if (msg.type === 'push' && msg.data instanceof Float32Array) {
+        if (latestFftFrame && fftInputPort) {
+          const recycleMsg: RecycleTransferRecycleMessage = { type: 'recycle', data: latestFftFrame };
+          try {
+            fftInputPort.postMessage(recycleMsg, [latestFftFrame.buffer]);
+          } catch {
+            // no-op
+          }
+        }
+        latestFftFrame = msg.data;
+        return;
       }
-      latestFftFrame.set(fftOut);
+      if (msg.type === 'reset') {
+        latestFftFrame = null;
+      }
+    };
+    if (typeof fftInputPort.start === 'function') {
+      fftInputPort.start();
+    }
+    await backend.setFftPort(Comlink.transfer(fftChannel.port2, [fftChannel.port2]));
+
+  // Comlinkのコールバック関数は proxy に包む必要がある
+    const onData = Comlink.proxy((perf?: DspPerfStats) => {
       if (perf) {
         dspPerf.blockBudgetMs = perf.blockBudgetMs;
         dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
@@ -978,6 +1014,7 @@ const start = async () => {
   } catch (e: any) {
     stopRenderLoop();
     stopAudio();
+    closeFftPort();
     if (backend) {
       try {
         await backend.stopRx();
@@ -1002,6 +1039,7 @@ const stop = async () => {
   } finally {
     stopRenderLoop();
     stopAudio();
+    closeFftPort();
     running.value = false;
     activeRxSampleRate.value = null;
     activeRfCenterFreq.value = null;
