@@ -42,13 +42,17 @@ function installRustLogFilter() {
 }
 
 const CASES = [
-	{ key: "am", label: "AM", demodMode: "AM", ifMinHz: 0, ifMaxHz: 4_500, fmStereo: false },
-	{ key: "fm_mono", label: "FM mono", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: false },
-	{ key: "fm_stereo", label: "FM stereo", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: true },
+	{ key: "am", label: "AM", demodMode: "AM", ifMinHz: 0, ifMaxHz: 4_500, fmStereo: false, wantFft: true },
+	{ key: "am_nofft", label: "AM nofft", demodMode: "AM", ifMinHz: 0, ifMaxHz: 4_500, fmStereo: false, wantFft: false },
+	{ key: "fm_mono", label: "FM mono", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: false, wantFft: true },
+	{ key: "fm_mono_nofft", label: "FM mono nofft", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: false, wantFft: false },
+	{ key: "fm_stereo", label: "FM stereo", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: true, wantFft: true },
+	{ key: "fm_stereo_nofft", label: "FM stereo nofft", demodMode: "FM", ifMinHz: 0, ifMaxHz: 98_000, fmStereo: true, wantFft: false },
 ];
+const DEFAULT_CASE_KEYS = new Set(["am", "fm_mono", "fm_stereo"]);
 
 const resolveCases = () => {
-	if (!CASE_KEYS_RAW) return CASES;
+	if (!CASE_KEYS_RAW) return CASES.filter((c) => DEFAULT_CASE_KEYS.has(c.key));
 	const requested = new Set(
 		CASE_KEYS_RAW
 			.split(",")
@@ -139,6 +143,44 @@ function printBench(flavor, bench) {
 	}
 }
 
+function printDerived(flavor, metrics) {
+	const get = (k) => metrics.get(k)?.msPerBlock;
+	const monoNoFft = get("fm_mono_nofft");
+	const stereoNoFft = get("fm_stereo_nofft");
+	const mono = get("fm_mono");
+	const stereo = get("fm_stereo");
+	const amNoFft = get("am_nofft");
+	const fmt = (v) => (Number.isFinite(v) ? `${v.toFixed(3)} ms` : "n/a");
+
+	if (
+		monoNoFft !== undefined ||
+		stereoNoFft !== undefined ||
+		mono !== undefined ||
+		stereo !== undefined ||
+		amNoFft !== undefined
+	) {
+		console.log(`\n[bench:${flavor}:derived]`);
+	}
+	if (amNoFft !== undefined) {
+		console.log(`mix proxy (am_nofft): ${fmt(amNoFft)}`);
+	}
+	if (monoNoFft !== undefined) {
+		console.log(`mix+mono path (fm_mono_nofft): ${fmt(monoNoFft)}`);
+	}
+	if (monoNoFft !== undefined && stereoNoFft !== undefined) {
+		console.log(`stereo extra (nofft): ${fmt(stereoNoFft - monoNoFft)}`);
+	}
+	if (mono !== undefined && stereo !== undefined) {
+		console.log(`stereo extra (with fft): ${fmt(stereo - mono)}`);
+	}
+	if (mono !== undefined && monoNoFft !== undefined) {
+		console.log(`fft extra (fm mono): ${fmt(mono - monoNoFft)}`);
+	}
+	if (stereo !== undefined && stereoNoFft !== undefined) {
+		console.log(`fft extra (fm stereo): ${fmt(stereo - stereoNoFft)}`);
+	}
+}
+
 async function runFlavor(flavor) {
 	const bindings = await loadBindings(flavor);
 	const bench = new Bench({
@@ -151,20 +193,23 @@ async function runFlavor(flavor) {
 		const receiver = setupReceiver(bindings, c);
 		receivers.push(receiver);
 		bench.add(c.label, () => {
-			receiver.process_iq_len(IQ_BYTES, true);
+			receiver.process_iq_len(IQ_BYTES, c.wantFft);
 		});
 	}
 	await bench.run();
 	printBench(flavor, bench);
 	const metrics = new Map();
-	for (const task of bench.tasks) {
+	for (let i = 0; i < bench.tasks.length; i += 1) {
+		const task = bench.tasks[i];
 		const r = task.result;
 		if (!r || !Number.isFinite(r.hz) || r.hz <= 0) continue;
-		metrics.set(task.name, {
+		const key = selectedCases[i]?.key ?? task.name;
+		metrics.set(key, {
 			hz: r.hz,
 			msPerBlock: 1000 / r.hz,
 		});
 	}
+	printDerived(flavor, metrics);
 	for (const receiver of receivers) {
 		freeReceiver(receiver);
 	}
