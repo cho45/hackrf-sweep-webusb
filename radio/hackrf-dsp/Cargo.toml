@@ -1,0 +1,43 @@
+[package]
+name = "hackrf-dsp"
+version = "0.1.0"
+authors = ["cho45 <cho45@lowreal.net>"]
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["console_error_panic_hook"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+rustfft = "6.4"
+console_error_panic_hook = { version = "0.1", optional = true }
+num-complex = "0.4.6"
+js-sys = "0.3.87"
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "receiver_criterion"
+harness = false
+
+[[bench]]
+name = "fm_stereo_criterion"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[profile.bench]
+opt-level = 3
+lto = false
+codegen-units = 16
+debug = true
+incremental = true

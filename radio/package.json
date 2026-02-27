@@ -1,0 +1,39 @@
+{
+  "name": "radio",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build:wasm": "WASM_FLAVOR=both WASM_NO_OPT=1 node ./scripts/build-wasm.js",
+    "build:wasm:perf": "WASM_FLAVOR=both WASM_NO_OPT=0 node ./scripts/build-wasm.js",
+    "build:wasm:base": "WASM_FLAVOR=base WASM_NO_OPT=1 node ./scripts/build-wasm.js",
+    "build:wasm:simd": "WASM_FLAVOR=simd WASM_NO_OPT=1 node ./scripts/build-wasm.js",
+    "bench:wasm:demod": "node ./scripts/bench-wasm-demod.js",
+    "bench:wasm:demod:perf": "npm run build:wasm:perf && npm run bench:wasm:demod",
+    "bench:wasm:simd": "BENCH_FLAVOR=both BENCH_CASES=fm_stereo node ./scripts/bench-wasm-demod.js",
+    "test:wasm:simd-parity": "vitest run ./hackrf-dsp/test/wasm-simd-parity.test.js",
+    "build:full": "npm run build:wasm && npm run build",
+    "build": "vue-tsc -b && vite build",
+    "preview": "vite preview",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "comlink": "^4.4.2",
+    "vue": "^3.5.25"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "@types/w3c-web-usb": "^1.0.13",
+    "@vitejs/plugin-vue": "^6.0.2",
+    "@vue/test-utils": "^2.4.6",
+    "@vue/tsconfig": "^0.8.1",
+    "jsdom": "^28.1.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1",
+    "vite-plugin-top-level-await": "^1.6.0",
+    "vite-plugin-wasm": "^3.5.0",
+    "vitest": "^4.0.18",
+    "vue-tsc": "^3.1.5"
+  }
+}
