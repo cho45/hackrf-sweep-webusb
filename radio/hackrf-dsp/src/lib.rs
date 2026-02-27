@@ -700,6 +700,8 @@ impl Receiver {
         self.mix_iq_to_baseband(iq_data);
 
         // デシメーション (粗段: rx->1Msps, 固定段: 1Msps->demod_rate)
+        // NOTE: 以前 mix+粗段boxcar の1パス融合を試したが、wasm実測(nofft)で改善が安定せず
+        //       複雑化だけ増えたため、ここは可読性優先で2段構成を維持する。
         self.coarse_filter
             .process_into(&self.baseband_buffer, &mut self.coarse_buffer);
         self.demod_filter
