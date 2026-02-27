@@ -100,6 +100,8 @@ const AGC_SETTLE_MS = 300;
 const AGC_VGA_SOFT_MAX = 40;
 const AGC_SNR_IMPROVE_MIN_DB = 0.6;
 const FFT_SIGNAL_NEIGHBOR_BINS = 1;
+const UI_FFT_PUSH_FPS = 30;
+const UI_FFT_PUSH_INTERVAL_MS = 1000 / UI_FFT_PUSH_FPS;
 
 const toAbortError = () => new DOMException("auto gain aborted", "AbortError");
 
@@ -546,7 +548,6 @@ export class RadioBackend {
 		);
 		this.receiver.set_fm_stereo_enabled(this.fmStereoEnabled);
 
-		// デバイス側にサンプリングレートおよび周波数を設定
 		// stop/start の繰り返しでRF設定が揮発するケースを避けるため、毎回再適用する。
 		await this.device.stopRx();
 		await this.device.setAmpEnable(this.ampEnabled);
@@ -597,17 +598,16 @@ export class RadioBackend {
 		let iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
 		let audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
 		let fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
-
 		const ensureViews = () => {
 			if (memoryBuffer === wasmMemory.buffer) return;
 			memoryBuffer = wasmMemory.buffer;
 			iqWriteView = new Uint8Array(memoryBuffer, iqPtr, iqCapacity);
 			audioReadView = new Float32Array(memoryBuffer, audioPtr, audioOutCapacity);
-				fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
-			};
+			fftReadView = new Float32Array(memoryBuffer, fftPtr, fftOutCapacity);
+		};
 
-			let fftScratch = new Float32Array(this.fftVisibleBins);
-			this.latestPerfStats = undefined;
+		let fftScratch = new Float32Array(this.fftVisibleBins);
+		this.latestPerfStats = undefined;
 
 		let perfStarted = false;
 		let perfWindowStart = 0;
@@ -619,6 +619,7 @@ export class RadioBackend {
 		let dspProcessMsLast = 0;
 		let dspProcessMsPeak = 0;
 		let audioFramesOutTotal = 0;
+		let lastUiPushAt = 0;
 
 		const readNum = (value: unknown): number | undefined => {
 			return typeof value === "number" && Number.isFinite(value) ? value : undefined;
@@ -641,10 +642,10 @@ export class RadioBackend {
 			return false;
 		};
 
-			const snapshotPerf = (now: number, fftFrame?: Float32Array): PerfStats | undefined => {
-				if (!perfStarted) return undefined;
-				const windowMs = now - perfWindowStart;
-				if (windowMs < 1000 || blockCount === 0) return undefined;
+		const snapshotPerf = (now: number, fftFrame?: Float32Array): PerfStats | undefined => {
+			if (!perfStarted) return undefined;
+			const windowMs = now - perfWindowStart;
+			if (windowMs < 1000 || blockCount === 0) return undefined;
 
 			const totalSec = Math.max(0.000001, (now - perfTotalStart) / 1000);
 			const demodStatsRaw = this.receiver?.get_stats?.();
@@ -652,57 +653,57 @@ export class RadioBackend {
 				demodStatsRaw && typeof demodStatsRaw === "object"
 					? (demodStatsRaw as Record<string, unknown>)
 					: {};
-				const fftQuality = fftFrame
-					? computeFftQuality(fftFrame, this.targetVisibleBin)
-					: { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
-				const stats: PerfStats = {
-					droppedIqBlocksCount,
-					blockIntervalMsPeak,
-					dspProcessMsLast,
-					dspProcessMsPeak,
-					audioOutHzLong: audioFramesOutTotal / totalSec,
-					fmStereoPilotLevel: readStatNum(
-						demodStats,
-						"fmStereoPilotLevel",
-						"fm_stereo_pilot_level",
-						"pilotLevel",
-						"pilot_level"
-					),
-					fmStereoBlend: readStatNum(
-						demodStats,
-						"fmStereoBlend",
-						"fm_stereo_blend",
-						"stereoBlend",
-						"stereo_blend"
-					),
-					fmStereoLocked: readStatBool(
-						demodStats,
-						"fmStereoLocked",
-						"fm_stereo_locked",
-						"stereoLocked",
-						"stereo_locked"
-					),
-					fmStereoMonoFallbackCount: readStatNum(
-						demodStats,
-						"fmStereoMonoFallbackCount",
-						"fm_stereo_mono_fallback_count",
-						"monoFallbackCount",
-						"mono_fallback_count"
-					),
-					fmStereoPllLocked: readStatBool(
-						demodStats,
-						"fmStereoPllLocked",
-						"fm_stereo_pll_locked",
-						"pllLocked",
-						"pll_locked"
-					),
-					adcPeak: readStatNum(demodStats, "adcPeak", "adc_peak"),
-					fftTargetDb: fftQuality.targetDb,
-					fftNoiseFloorDb: fftQuality.noiseFloorDb,
-					fftSnrDb: fftQuality.snrDb,
-				};
-					this.latestPerfStats = stats;
-					this.latestPerfSeq += 1;
+			const fftQuality = fftFrame
+				? computeFftQuality(fftFrame, this.targetVisibleBin)
+				: { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
+			const stats: PerfStats = {
+				droppedIqBlocksCount,
+				blockIntervalMsPeak,
+				dspProcessMsLast,
+				dspProcessMsPeak,
+				audioOutHzLong: audioFramesOutTotal / totalSec,
+				fmStereoPilotLevel: readStatNum(
+					demodStats,
+					"fmStereoPilotLevel",
+					"fm_stereo_pilot_level",
+					"pilotLevel",
+					"pilot_level"
+				),
+				fmStereoBlend: readStatNum(
+					demodStats,
+					"fmStereoBlend",
+					"fm_stereo_blend",
+					"stereoBlend",
+					"stereo_blend"
+				),
+				fmStereoLocked: readStatBool(
+					demodStats,
+					"fmStereoLocked",
+					"fm_stereo_locked",
+					"stereoLocked",
+					"stereo_locked"
+				),
+				fmStereoMonoFallbackCount: readStatNum(
+					demodStats,
+					"fmStereoMonoFallbackCount",
+					"fm_stereo_mono_fallback_count",
+					"monoFallbackCount",
+					"mono_fallback_count"
+				),
+				fmStereoPllLocked: readStatBool(
+					demodStats,
+					"fmStereoPllLocked",
+					"fm_stereo_pll_locked",
+					"pllLocked",
+					"pll_locked"
+				),
+				adcPeak: readStatNum(demodStats, "adcPeak", "adc_peak"),
+				fftTargetDb: fftQuality.targetDb,
+				fftNoiseFloorDb: fftQuality.noiseFloorDb,
+				fftSnrDb: fftQuality.snrDb,
+			};
+			this.latestPerfStats = stats;
+			this.latestPerfSeq += 1;
 
 			perfWindowStart = now;
 			blockCount = 0;
@@ -717,6 +718,7 @@ export class RadioBackend {
 				perfWindowStart = now;
 				perfTotalStart = now;
 				lastBlockAt = now;
+				lastUiPushAt = now;
 			}
 			if (blockCount > 0) {
 				const blockIntervalMs = now - lastBlockAt;
@@ -750,6 +752,7 @@ export class RadioBackend {
 			if (processMs > dspProcessMsPeak) {
 				dspProcessMsPeak = processMs;
 			}
+
 			if (audioLen >= 0) {
 				if (audioLen > 0) {
 					if (this.audioPort) {
@@ -761,20 +764,26 @@ export class RadioBackend {
 						);
 					}
 				}
-					const visibleBins = Math.max(
-						1,
-						Math.min(this.fftVisibleBins || fftOutCapacity, fftOutCapacity)
-					);
+				audioFramesOutTotal += Math.floor(audioLen / audioChannels);
+
+				const visibleBins = Math.max(
+					1,
+					Math.min(this.fftVisibleBins || fftOutCapacity, fftOutCapacity)
+				);
+				const perfDue = now - perfWindowStart >= 1000 && blockCount > 0;
+				const shouldPushUi = perfDue || now - lastUiPushAt >= UI_FFT_PUSH_INTERVAL_MS;
+				if (shouldPushUi) {
 					if (fftScratch.length !== visibleBins) {
 						fftScratch = new Float32Array(visibleBins);
 					}
 					fftScratch.set(fftReadView.subarray(0, visibleBins));
-					audioFramesOutTotal += Math.floor(audioLen / audioChannels);
-						const perf = snapshotPerf(performance.now(), fftScratch);
-						onData(fftScratch, perf);
+					const perf = snapshotPerf(now, fftScratch);
+					onData(fftScratch, perf);
+					lastUiPushAt = now;
 				}
-			});
-		}
+			}
+		});
+	}
 
 	async stopRx() {
 		this.cancelAutoSetGain();
