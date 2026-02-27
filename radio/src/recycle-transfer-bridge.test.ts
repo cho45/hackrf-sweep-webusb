@@ -1,16 +1,16 @@
 import { describe, expect, it } from "vitest";
 import {
-	AudioPacketReceiver,
-	AudioPacketSender,
-	type AudioPushMessage,
-} from "./audio-packet-bridge";
+	RecycleTransferReceiver,
+	RecycleTransferSender,
+	type RecycleTransferPushMessage,
+} from "./recycle-transfer-bridge";
 
-describe("audio-packet-bridge", () => {
+describe("recycle-transfer-bridge", () => {
 	it("packs variable-length audio into fixed-size packets", () => {
-		const sender = new AudioPacketSender(8, 4);
-		const sent: AudioPushMessage[] = [];
+		const sender = new RecycleTransferSender(8, 4);
+		const sent: RecycleTransferPushMessage[] = [];
 		const port = {
-			postMessage: (msg: AudioPushMessage) => {
+			postMessage: (msg: RecycleTransferPushMessage) => {
 				sent.push(msg);
 			},
 		};
@@ -24,10 +24,10 @@ describe("audio-packet-bridge", () => {
 	});
 
 	it("tracks dropped samples when sender pool is exhausted", () => {
-		const sender = new AudioPacketSender(4, 1);
-		const sent: AudioPushMessage[] = [];
+		const sender = new RecycleTransferSender(4, 1);
+		const sent: RecycleTransferPushMessage[] = [];
 		const port = {
-			postMessage: (msg: AudioPushMessage) => {
+			postMessage: (msg: RecycleTransferPushMessage) => {
 				sent.push(msg);
 			},
 		};
@@ -38,7 +38,7 @@ describe("audio-packet-bridge", () => {
 	});
 
 	it("drops oldest receiver frames and reports dropped samples", () => {
-		const receiver = new AudioPacketReceiver();
+		const receiver = new RecycleTransferReceiver();
 		const recycled: number[] = [];
 
 		expect(
@@ -65,8 +65,8 @@ describe("audio-packet-bridge", () => {
 	});
 
 	it("recycles transferred buffers between sender and receiver over MessagePort", async () => {
-		const sender = new AudioPacketSender(4, 1);
-		const receiver = new AudioPacketReceiver();
+		const sender = new RecycleTransferSender(4, 1);
+		const receiver = new RecycleTransferReceiver();
 		const ch = new MessageChannel();
 		if (typeof ch.port1.start === "function") ch.port1.start();
 		if (typeof ch.port2.start === "function") ch.port2.start();
@@ -102,7 +102,7 @@ describe("audio-packet-bridge", () => {
 
 			ch.port2.onmessage = (ev: MessageEvent) => {
 				try {
-					const msg = ev.data as AudioPushMessage;
+					const msg = ev.data as RecycleTransferPushMessage;
 					expect(msg.type).toBe("push");
 					expect(receiver.pushFromMessage(msg)).toBe(true);
 					const out = new Float32Array(4);
@@ -133,4 +133,3 @@ describe("audio-packet-bridge", () => {
 		ch.port2.close();
 	});
 });
-

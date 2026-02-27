@@ -1,9 +1,9 @@
 /// <reference lib="webworker" />
 import {
-  AudioPacketReceiver,
-  type AudioInputMessage,
-  type AudioRecycleMessage,
-} from "./audio-packet-bridge";
+  RecycleTransferReceiver,
+  type RecycleTransferInputMessage,
+  type RecycleTransferRecycleMessage,
+} from "./recycle-transfer-bridge";
 
 declare abstract class AudioWorkletProcessor {
   readonly port: MessagePort;
@@ -31,7 +31,7 @@ type StatsMessage = {
 const workletGlobal = globalThis as { sampleRate: number; currentTime: number };
 
 export class AudioStreamProcessor extends AudioWorkletProcessor {
-  private readonly packetQueue = new AudioPacketReceiver();
+  private readonly packetQueue = new RecycleTransferReceiver();
 
   private inputPort: MessagePort | null = null;
 
@@ -87,7 +87,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private recycleChunkData(data: Float32Array): void {
     if (!this.inputPort) return;
-    const msg: AudioRecycleMessage = { type: "recycle", data };
+    const msg: RecycleTransferRecycleMessage = { type: "recycle", data };
     this.inputPort.postMessage(msg, [data.buffer]);
   }
 
@@ -118,13 +118,13 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
         }
         this.inputPort = msg.port;
         this.inputPort.onmessage = (e: MessageEvent) =>
-          this.handleInputMessage(e.data as AudioInputMessage);
+          this.handleInputMessage(e.data as RecycleTransferInputMessage);
         this.inputPort.start();
       }
     };
   }
 
-  private handleInputMessage(msg: AudioInputMessage): void {
+  private handleInputMessage(msg: RecycleTransferInputMessage): void {
     if (!msg || typeof msg !== "object") return;
 
     if (msg.type === "push") {

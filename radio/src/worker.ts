@@ -1,7 +1,7 @@
 import { expose } from "comlink";
 import initBase, { Receiver as ReceiverBase } from "../hackrf-dsp/pkg/hackrf_dsp";
 import initSimd, { Receiver as ReceiverSimd } from "../hackrf-dsp/pkg-simd/hackrf_dsp";
-import { AudioPacketSender } from "./audio-packet-bridge";
+import { RecycleTransferSender } from "./recycle-transfer-bridge";
 import { HackRF } from "./hackrf";
 
 type PerfStats = {
@@ -208,7 +208,7 @@ export class RadioBackend {
 	private latestPerfSeq = 0;
 	private autoGainPromise: Promise<AutoGainResult> | null = null;
 	private autoGainAbortController: AbortController | null = null;
-	private audioPacketSender: AudioPacketSender | null = null;
+	private audioPacketSender: RecycleTransferSender | null = null;
 
 	private async ensureWasm() {
 		if (!this.wasmBindings) {
@@ -584,7 +584,7 @@ export class RadioBackend {
 		const audioChannels = Math.max(1, Math.min(2, this.receiver.audio_output_channels()));
 		const packetFrames = Math.max(128, Math.round(options.outputSampleRate * (AUDIO_PACKET_MS / 1000)));
 		const packetSamples = packetFrames * audioChannels;
-		this.audioPacketSender = new AudioPacketSender(packetSamples, AUDIO_PACKET_POOL);
+		this.audioPacketSender = new RecycleTransferSender(packetSamples, AUDIO_PACKET_POOL);
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
 		const blockBudgetMs = (iqSamplesPerBlock / Math.max(1, options.sampleRate)) * 1000;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
