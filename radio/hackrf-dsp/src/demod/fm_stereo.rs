@@ -2,7 +2,7 @@ use super::PhaseNco;
 use crate::filter::{ComplexFirFilter, FirFilter};
 use num_complex::Complex;
 
-pub const FM_STEREO_INTERMEDIATE_RATE_HZ: f32 = 200_000.0;
+pub const FM_STEREO_INTERMEDIATE_RATE_HZ: f32 = 250_000.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FMStereoStats {

@@ -38,12 +38,12 @@ const AM_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
     audio_cutoff_hz: 5_000.0,
 };
 const FM_MONO_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
-    demod_rate_hz: 200_000.0,
-    intermediate_rate_hz: 200_000.0,
+    demod_rate_hz: 250_000.0,
+    intermediate_rate_hz: 250_000.0,
     audio_cutoff_hz: 15_000.0,
 };
 const FM_STEREO_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
-    demod_rate_hz: 200_000.0,
+    demod_rate_hz: 250_000.0,
     intermediate_rate_hz: FM_STEREO_INTERMEDIATE_RATE_HZ,
     audio_cutoff_hz: 15_000.0,
 };
@@ -958,7 +958,7 @@ mod tests {
             20_000_000.0,
         ] {
             let plan = build_decimation_plan(sr, DemodMode::Fm);
-            assert_eq!(plan.demod_factor, 5);
+            assert_eq!(plan.demod_factor, 4);
             approx_eq(plan.coarse_stage_rate, 1_000_000.0);
             approx_eq(plan.demod_sample_rate, FM_MONO_AUDIO_PATH.demod_rate_hz);
         }

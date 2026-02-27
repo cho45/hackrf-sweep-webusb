@@ -55,7 +55,7 @@ UI で主に入力するのは次の2つです。
 3. 粗段デシメーション（boxcar）: `rxSampleRate -> 1 Msps`
 4. 復調段デシメーション（FIR band-pass）
    - AM: `1 MHz -> 50 kHz` (`/20`)
-   - FM: `1 MHz -> 200 kHz` (`/5`)
+   - FM: `1 MHz -> 250 kHz` (`/4`)
 5. 復調
    - AM: 包絡線（絶対値）+ DC 除去 + AGC
    - FM: 遅延検波（位相差分）による周波数復調 + ステレオデコード（PLLによる19kHz同期とL-R分離）
