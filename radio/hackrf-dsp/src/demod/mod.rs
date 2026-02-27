@@ -10,6 +10,48 @@ pub use am::AMDemodulator;
 pub use fm::FMDemodulator;
 pub use fm_stereo::{FMStereoDecoder, FMStereoStats};
 
+/// 位相加算ベースのNCO（周波数補正を毎サンプルで加える用途向け）。
+pub struct PhaseNco {
+    phase: f32,
+    omega: f32,
+}
+
+impl PhaseNco {
+    #[inline(always)]
+    pub fn new(freq_hz: f32, sample_rate: f32) -> Self {
+        let omega = 2.0 * std::f32::consts::PI * freq_hz / sample_rate;
+        Self { phase: 0.0, omega }
+    }
+
+    #[inline(always)]
+    pub fn reset(&mut self) {
+        self.phase = 0.0;
+    }
+
+    #[inline(always)]
+    pub fn sin_cos(&self) -> (f32, f32) {
+        self.phase.sin_cos()
+    }
+
+    #[inline(always)]
+    pub fn advance(&mut self, extra_omega: f32) {
+        self.phase += self.omega + extra_omega;
+        if self.phase >= 2.0 * std::f32::consts::PI {
+            self.phase -= 2.0 * std::f32::consts::PI;
+        } else if self.phase < 0.0 {
+            self.phase += 2.0 * std::f32::consts::PI;
+        }
+    }
+
+    /// 現在位相の sin/cos を返し、次サンプルに向けて位相を進める。
+    #[inline(always)]
+    pub fn sin_cos_and_advance(&mut self, extra_omega: f32) -> (f32, f32) {
+        let out = self.phase.sin_cos();
+        self.advance(extra_omega);
+        out
+    }
+}
+
 /// Number Controlled Oscillator (NCO)
 /// 複素ベースバンド変換のための内部発振器
 pub struct Nco {
@@ -147,5 +189,24 @@ mod tests {
         let c3 = nco.step();
         assert!(c3.re.abs() < 1e-6);
         assert!((c3.im - (-1.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_phase_nco_advance_with_extra() {
+        let sample_rate = 1000.0f32;
+        let mut nco = PhaseNco::new(250.0, sample_rate);
+        let (_, c0) = nco.sin_cos();
+        assert!((c0 - 1.0).abs() < 1e-6);
+
+        nco.advance(0.0);
+        let (s1, c1) = nco.sin_cos();
+        assert!((s1 - 1.0).abs() < 1e-6);
+        assert!(c1.abs() < 1e-6);
+
+        // 追加位相でさらに45度進む
+        nco.advance(std::f32::consts::PI / 4.0);
+        let (s2, c2) = nco.sin_cos();
+        assert!((s2 - c2).abs() < 1e-5); // 225度付近
+        assert!(s2 < 0.0 && c2 < 0.0);
     }
 }

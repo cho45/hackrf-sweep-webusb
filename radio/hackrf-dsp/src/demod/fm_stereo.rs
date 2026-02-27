@@ -1,3 +1,4 @@
+use super::PhaseNco;
 use crate::filter::{ComplexFirFilter, FirFilter};
 use num_complex::Complex;
 
@@ -44,62 +45,29 @@ const PILOT_SIDE_UPDATE_INTERVAL: usize = 4;
 /// - L-R は 38kHz 同期検波 + LPF
 /// - pilot レベルに応じて stereo blend を自動調整し、ロック不十分時は mono に寄せる
 pub struct FMStereoDecoder {
-    sample_rate_hz: f32,
-    pilot_phase: f32,
-    pilot_omega: f32,
-    pilot_lo_phase: f32,
-    pilot_lo_omega: f32,
-    pilot_hi_phase: f32,
-    pilot_hi_omega: f32,
+    cfg: FMStereoConfig,
+    nco: NcoState,
+    pilot: PilotState,
+    pll: PllState,
+    dc: DcBlockState,
+    filters: FilterState,
+    lr: LrState,
+    audio: AudioState,
+    blend: BlendState,
+}
 
-    pilot_i_lp: f32,
-    pilot_q_lp: f32,
-    pilot_i_lo_lp: f32,
-    pilot_q_lo_lp: f32,
-    pilot_i_hi_lp: f32,
-    pilot_q_hi_lp: f32,
+struct FMStereoConfig {
+    sample_rate_hz: f32,
     pilot_lp_alpha: f32,
     pilot_lp_alpha_side: f32,
-    pilot_phase_err_last: f32,
-    pll_kp: f32,
-    pll_ki: f32,
-    pll_freq_corr: f32,
-    pll_freq_corr_max: f32,
-    pll_update_countdown: usize,
-    pll_mix_cos2err: f32,
-    pll_mix_sin2err: f32,
-
-    dc_prev_x: f32,
-    dc_prev_y: f32,
-    dc_hp_a: f32,
-
-    sum_lpf: FirFilter,
-    diff_lpf: ComplexFirFilter,
-    lr2_re_lp: f32,
-    lr2_im_lp: f32,
-    lr_phase_track_alpha: f32,
-    lr_phase_corr_cos: f32,
-    lr_phase_corr_sin: f32,
-    lr_phase_update_countdown: usize,
-
-    deemphasis_alpha: Option<f32>,
-    deemphasis_l: f32,
-    deemphasis_r: f32,
-
-    pilot_level: f32,
     pilot_level_alpha: f32,
-    pilot_mix_power: f32,
     pilot_power_alpha: f32,
-    pilot_fraction: f32,
     pilot_fraction_alpha: f32,
-    pilot_quality: f32,
     pilot_quality_alpha: f32,
-    pilot_side_update_countdown: usize,
-
-    stereo_blend: f32,
     blend_attack_alpha: f32,
     blend_release_alpha: f32,
-
+    lr_phase_track_alpha: f32,
+    deemphasis_alpha: Option<f32>,
     pilot_lock_low: f32,
     pilot_lock_high: f32,
     pilot_fraction_low: f32,
@@ -108,7 +76,69 @@ pub struct FMStereoDecoder {
     pilot_quality_high: f32,
     stereo_lock_on: f32,
     stereo_lock_off: f32,
+}
 
+struct NcoState {
+    pilot: PhaseNco,
+    pilot_lo: PhaseNco,
+    pilot_hi: PhaseNco,
+}
+
+#[derive(Default)]
+struct PilotState {
+    i_lp: f32,
+    q_lp: f32,
+    i_lo_lp: f32,
+    q_lo_lp: f32,
+    i_hi_lp: f32,
+    q_hi_lp: f32,
+    level: f32,
+    mix_power: f32,
+    fraction: f32,
+    quality: f32,
+    side_update_countdown: usize,
+}
+
+struct PllState {
+    phase_err_last: f32,
+    kp: f32,
+    ki: f32,
+    freq_corr: f32,
+    freq_corr_max: f32,
+    update_countdown: usize,
+    mix_cos2err: f32,
+    mix_sin2err: f32,
+}
+
+struct DcBlockState {
+    prev_x: f32,
+    prev_y: f32,
+    hp_a: f32,
+}
+
+struct FilterState {
+    sum_lpf: FirFilter,
+    diff_lpf: ComplexFirFilter,
+}
+
+#[derive(Default)]
+struct LrState {
+    re_lp: f32,
+    im_lp: f32,
+    corr_cos: f32,
+    corr_sin: f32,
+    update_countdown: usize,
+}
+
+#[derive(Default)]
+struct AudioState {
+    deemphasis_l: f32,
+    deemphasis_r: f32,
+}
+
+#[derive(Default)]
+struct BlendState {
+    stereo_blend: f32,
     stereo_locked: bool,
     mono_fallback_count: u32,
 }
@@ -135,91 +165,30 @@ fn pilot_phase_error_from_iq(i: f32, q: f32) -> f32 {
     0.5 * twice_err
 }
 
-impl FMStereoDecoder {
-    pub fn new(sample_rate_hz: f32, deemphasis_tau_us: Option<f32>) -> Self {
-        assert!(sample_rate_hz > 0.0, "sample_rate_hz must be > 0");
-
-        let pilot_omega = 2.0 * std::f32::consts::PI * 19_000.0 / sample_rate_hz;
-        let pilot_lo_omega = 2.0 * std::f32::consts::PI * 18_000.0 / sample_rate_hz;
-        let pilot_hi_omega = 2.0 * std::f32::consts::PI * 20_000.0 / sample_rate_hz;
+impl FMStereoConfig {
+    fn new(sample_rate_hz: f32, deemphasis_tau_us: Option<f32>) -> Self {
         let pilot_lp_alpha = alpha_from_cutoff(sample_rate_hz, PILOT_DETECT_LPF_HZ);
-        let pilot_lp_alpha_side =
-            1.0 - (1.0 - pilot_lp_alpha).powi(PILOT_SIDE_UPDATE_INTERVAL as i32);
-        let dc_hp_a = (-2.0 * std::f32::consts::PI * 30.0 / sample_rate_hz).exp();
-        let pilot_level_alpha = alpha_from_tau(sample_rate_hz, 0.02);
-        let pilot_power_alpha = alpha_from_tau(sample_rate_hz, 0.02);
-        let pilot_fraction_alpha = alpha_from_tau(sample_rate_hz, 0.03);
-        let pilot_quality_alpha = alpha_from_tau(sample_rate_hz, 0.05);
-        let blend_attack_alpha = alpha_from_tau(sample_rate_hz, 0.03);
-        let blend_release_alpha = alpha_from_tau(sample_rate_hz, 0.20);
-        let lr_phase_track_alpha = alpha_from_cutoff(sample_rate_hz, LR_PHASE_TRACK_LPF_HZ);
-        let wn = 2.0 * std::f32::consts::PI * PLL_BW_HZ / sample_rate_hz;
-        let pll_kp = 2.0 * PLL_DAMPING * wn;
-        let pll_ki = wn * wn;
-        let pll_freq_corr_max = 2.0 * std::f32::consts::PI * PLL_MAX_FREQ_ERR_HZ / sample_rate_hz;
         let deemphasis_alpha = deemphasis_tau_us.and_then(|tau_us| {
             if tau_us <= 0.0 {
-                return None;
+                None
+            } else {
+                Some(alpha_from_tau(sample_rate_hz, tau_us * 1e-6))
             }
-            Some(alpha_from_tau(sample_rate_hz, tau_us * 1e-6))
         });
 
         Self {
             sample_rate_hz,
-            pilot_phase: 0.0,
-            pilot_omega,
-            pilot_lo_phase: 0.0,
-            pilot_lo_omega,
-            pilot_hi_phase: 0.0,
-            pilot_hi_omega,
-            pilot_i_lp: 0.0,
-            pilot_q_lp: 0.0,
-            pilot_i_lo_lp: 0.0,
-            pilot_q_lo_lp: 0.0,
-            pilot_i_hi_lp: 0.0,
-            pilot_q_hi_lp: 0.0,
             pilot_lp_alpha,
-            pilot_lp_alpha_side,
-            pilot_phase_err_last: 0.0,
-            pll_kp,
-            pll_ki,
-            pll_freq_corr: 0.0,
-            pll_freq_corr_max,
-            pll_update_countdown: 0,
-            pll_mix_cos2err: 1.0,
-            pll_mix_sin2err: 0.0,
-            dc_prev_x: 0.0,
-            dc_prev_y: 0.0,
-            dc_hp_a,
-            sum_lpf: FirFilter::new_lowpass_hamming(
-                SUM_AUDIO_FIR_TAPS,
-                SUM_AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
-            ),
-            diff_lpf: ComplexFirFilter::new_lowpass_hamming(
-                DIFF_AUDIO_FIR_TAPS,
-                DIFF_AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
-            ),
-            lr2_re_lp: 0.0,
-            lr2_im_lp: 0.0,
-            lr_phase_track_alpha,
-            lr_phase_corr_cos: 1.0,
-            lr_phase_corr_sin: 0.0,
-            lr_phase_update_countdown: 0,
+            pilot_lp_alpha_side: 1.0
+                - (1.0 - pilot_lp_alpha).powi(PILOT_SIDE_UPDATE_INTERVAL as i32),
+            pilot_level_alpha: alpha_from_tau(sample_rate_hz, 0.02),
+            pilot_power_alpha: alpha_from_tau(sample_rate_hz, 0.02),
+            pilot_fraction_alpha: alpha_from_tau(sample_rate_hz, 0.03),
+            pilot_quality_alpha: alpha_from_tau(sample_rate_hz, 0.05),
+            blend_attack_alpha: alpha_from_tau(sample_rate_hz, 0.03),
+            blend_release_alpha: alpha_from_tau(sample_rate_hz, 0.20),
+            lr_phase_track_alpha: alpha_from_cutoff(sample_rate_hz, LR_PHASE_TRACK_LPF_HZ),
             deemphasis_alpha,
-            deemphasis_l: 0.0,
-            deemphasis_r: 0.0,
-            pilot_level: 0.0,
-            pilot_level_alpha,
-            pilot_mix_power: 0.0,
-            pilot_power_alpha,
-            pilot_fraction: 0.0,
-            pilot_fraction_alpha,
-            pilot_quality: 0.0,
-            pilot_quality_alpha,
-            pilot_side_update_countdown: 0,
-            stereo_blend: 0.0,
-            blend_attack_alpha,
-            blend_release_alpha,
             pilot_lock_low: 0.010,
             pilot_lock_high: 0.030,
             pilot_fraction_low: 0.006,
@@ -228,45 +197,139 @@ impl FMStereoDecoder {
             pilot_quality_high: 4.0,
             stereo_lock_on: 0.55,
             stereo_lock_off: 0.35,
-            stereo_locked: false,
-            mono_fallback_count: 0,
+        }
+    }
+}
+
+impl NcoState {
+    fn new(sample_rate_hz: f32) -> Self {
+        Self {
+            pilot: PhaseNco::new(19_000.0, sample_rate_hz),
+            pilot_lo: PhaseNco::new(18_000.0, sample_rate_hz),
+            pilot_hi: PhaseNco::new(20_000.0, sample_rate_hz),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.pilot.reset();
+        self.pilot_lo.reset();
+        self.pilot_hi.reset();
+    }
+}
+
+impl PllState {
+    fn new(sample_rate_hz: f32) -> Self {
+        let wn = 2.0 * std::f32::consts::PI * PLL_BW_HZ / sample_rate_hz;
+        Self {
+            phase_err_last: 0.0,
+            kp: 2.0 * PLL_DAMPING * wn,
+            ki: wn * wn,
+            freq_corr: 0.0,
+            freq_corr_max: 2.0 * std::f32::consts::PI * PLL_MAX_FREQ_ERR_HZ / sample_rate_hz,
+            update_countdown: 0,
+            mix_cos2err: 1.0,
+            mix_sin2err: 0.0,
+        }
+    }
+
+    fn reset(&mut self) {
+        self.phase_err_last = 0.0;
+        self.freq_corr = 0.0;
+        self.update_countdown = 0;
+        self.mix_cos2err = 1.0;
+        self.mix_sin2err = 0.0;
+    }
+}
+
+impl DcBlockState {
+    fn new(sample_rate_hz: f32) -> Self {
+        Self {
+            prev_x: 0.0,
+            prev_y: 0.0,
+            hp_a: (-2.0 * std::f32::consts::PI * 30.0 / sample_rate_hz).exp(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.prev_x = 0.0;
+        self.prev_y = 0.0;
+    }
+}
+
+impl FilterState {
+    fn new(sample_rate_hz: f32) -> Self {
+        Self {
+            sum_lpf: FirFilter::new_lowpass_hamming(
+                SUM_AUDIO_FIR_TAPS,
+                SUM_AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
+            ),
+            diff_lpf: ComplexFirFilter::new_lowpass_hamming(
+                DIFF_AUDIO_FIR_TAPS,
+                DIFF_AUDIO_LPF_CUTOFF_HZ / sample_rate_hz,
+            ),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.sum_lpf.reset();
+        self.diff_lpf.reset();
+    }
+}
+
+impl LrState {
+    fn reset(&mut self) {
+        self.re_lp = 0.0;
+        self.im_lp = 0.0;
+        self.corr_cos = 1.0;
+        self.corr_sin = 0.0;
+        self.update_countdown = 0;
+    }
+}
+
+impl AudioState {
+    fn reset(&mut self) {
+        self.deemphasis_l = 0.0;
+        self.deemphasis_r = 0.0;
+    }
+}
+
+impl BlendState {
+    fn reset(&mut self) {
+        self.stereo_blend = 0.0;
+        self.stereo_locked = false;
+        self.mono_fallback_count = 0;
+    }
+}
+
+impl FMStereoDecoder {
+    pub fn new(sample_rate_hz: f32, deemphasis_tau_us: Option<f32>) -> Self {
+        assert!(sample_rate_hz > 0.0, "sample_rate_hz must be > 0");
+        let cfg = FMStereoConfig::new(sample_rate_hz, deemphasis_tau_us);
+        let mut lr = LrState::default();
+        lr.reset();
+
+        Self {
+            cfg,
+            nco: NcoState::new(sample_rate_hz),
+            pilot: PilotState::default(),
+            pll: PllState::new(sample_rate_hz),
+            dc: DcBlockState::new(sample_rate_hz),
+            filters: FilterState::new(sample_rate_hz),
+            lr,
+            audio: AudioState::default(),
+            blend: BlendState::default(),
         }
     }
 
     pub fn reset(&mut self) {
-        self.pilot_phase = 0.0;
-        self.pilot_lo_phase = 0.0;
-        self.pilot_hi_phase = 0.0;
-        self.pilot_i_lp = 0.0;
-        self.pilot_q_lp = 0.0;
-        self.pilot_i_lo_lp = 0.0;
-        self.pilot_q_lo_lp = 0.0;
-        self.pilot_i_hi_lp = 0.0;
-        self.pilot_q_hi_lp = 0.0;
-        self.pilot_phase_err_last = 0.0;
-        self.pll_freq_corr = 0.0;
-        self.pll_update_countdown = 0;
-        self.pll_mix_cos2err = 1.0;
-        self.pll_mix_sin2err = 0.0;
-        self.pilot_side_update_countdown = 0;
-        self.dc_prev_x = 0.0;
-        self.dc_prev_y = 0.0;
-        self.sum_lpf.reset();
-        self.diff_lpf.reset();
-        self.lr2_re_lp = 0.0;
-        self.lr2_im_lp = 0.0;
-        self.lr_phase_corr_cos = 1.0;
-        self.lr_phase_corr_sin = 0.0;
-        self.lr_phase_update_countdown = 0;
-        self.deemphasis_l = 0.0;
-        self.deemphasis_r = 0.0;
-        self.pilot_level = 0.0;
-        self.pilot_mix_power = 0.0;
-        self.pilot_fraction = 0.0;
-        self.pilot_quality = 0.0;
-        self.stereo_blend = 0.0;
-        self.stereo_locked = false;
-        self.mono_fallback_count = 0;
+        self.nco.reset();
+        self.pilot = PilotState::default();
+        self.pll.reset();
+        self.dc.reset();
+        self.filters.reset();
+        self.lr.reset();
+        self.audio.reset();
+        self.blend.reset();
     }
 
     pub fn process(&mut self, mpx: &[f32], left: &mut Vec<f32>, right: &mut Vec<f32>) {
@@ -277,190 +340,193 @@ impl FMStereoDecoder {
         right.clear();
         left.reserve(mpx.len());
         right.reserve(mpx.len());
+        let (mut s19, mut c19) = self.nco.pilot.sin_cos();
 
         for &raw in mpx {
-            // MPXの低域DCは分離に悪影響なので軽く除去する。
-            let x = raw - self.dc_prev_x + self.dc_hp_a * self.dc_prev_y;
-            self.dc_prev_x = raw;
-            self.dc_prev_y = x;
+            // 1) MPX低域DCを除去
+            let x = self.process_dc(raw);
 
-            let (s19, c19) = self.pilot_phase.sin_cos();
+            // 2) pilotの同期検波と品質推定を更新
+            self.update_pilot_tracking(x, s19, c19);
 
-            // 19k pilot の複素包絡を推定し、位相オフセットを取り出す。
-            // ここで得た位相を 2倍して 38k の同期検波器を作る。
-            let pilot_i = x * c19;
-            let pilot_q = -x * s19;
-            let pilot_mix_power_inst = pilot_i * pilot_i + pilot_q * pilot_q;
-            self.pilot_mix_power +=
-                self.pilot_power_alpha * (pilot_mix_power_inst - self.pilot_mix_power);
-            self.pilot_i_lp += self.pilot_lp_alpha * (pilot_i - self.pilot_i_lp);
-            self.pilot_q_lp += self.pilot_lp_alpha * (pilot_q - self.pilot_q_lp);
+            // 3) pilot位相誤差でPLLを更新
+            self.update_pll();
 
-            // 近傍の 18kHz / 20kHz でも同様の同期検波を行い、ノイズ床推定に使う。
-            if self.pilot_side_update_countdown == 0 {
-                let (s18, c18) = self.pilot_lo_phase.sin_cos();
-                let (s20, c20) = self.pilot_hi_phase.sin_cos();
-                let pilot_i_lo = x * c18;
-                let pilot_q_lo = -x * s18;
-                let pilot_i_hi = x * c20;
-                let pilot_q_hi = -x * s20;
-                self.pilot_i_lo_lp += self.pilot_lp_alpha_side * (pilot_i_lo - self.pilot_i_lo_lp);
-                self.pilot_q_lo_lp += self.pilot_lp_alpha_side * (pilot_q_lo - self.pilot_q_lo_lp);
-                self.pilot_i_hi_lp += self.pilot_lp_alpha_side * (pilot_i_hi - self.pilot_i_hi_lp);
-                self.pilot_q_hi_lp += self.pilot_lp_alpha_side * (pilot_q_hi - self.pilot_q_hi_lp);
-                self.pilot_side_update_countdown = PILOT_SIDE_UPDATE_INTERVAL - 1;
-            } else {
-                self.pilot_side_update_countdown -= 1;
-            }
+            // 4) pilot品質からstereo blend/lockを更新
+            self.update_blend_and_lock();
 
-            if self.pll_update_countdown == 0 {
-                let pilot_phase_err = pilot_phase_error_from_iq(self.pilot_i_lp, self.pilot_q_lp);
-                self.pilot_phase_err_last = pilot_phase_err;
-                let (sin2err, cos2err) = (2.0 * pilot_phase_err).sin_cos();
-                self.pll_mix_cos2err = cos2err;
-                self.pll_mix_sin2err = sin2err;
-                // 2次PLL: 位相誤差でNCOの周波数補正を更新し、狭帯域で安定追従させる。
-                self.pll_freq_corr = (self.pll_freq_corr + self.pll_ki * pilot_phase_err)
-                    .clamp(-self.pll_freq_corr_max, self.pll_freq_corr_max);
-                self.pll_update_countdown = PLL_UPDATE_INTERVAL - 1;
-            } else {
-                self.pll_update_countdown -= 1;
-            }
-            let pilot_phase_err = self.pilot_phase_err_last;
-            let pilot_coherent_power =
-                self.pilot_i_lp * self.pilot_i_lp + self.pilot_q_lp * self.pilot_q_lp;
-            let pilot_side_power = 0.5
-                * ((self.pilot_i_lo_lp * self.pilot_i_lo_lp
-                    + self.pilot_q_lo_lp * self.pilot_q_lo_lp)
-                    + (self.pilot_i_hi_lp * self.pilot_i_hi_lp
-                        + self.pilot_q_hi_lp * self.pilot_q_hi_lp));
-            let pilot_level_inst = pilot_coherent_power.sqrt() * 2.0;
-            self.pilot_level += self.pilot_level_alpha * (pilot_level_inst - self.pilot_level);
-            let pilot_fraction_inst = pilot_coherent_power / (self.pilot_mix_power + 1e-9);
-            self.pilot_fraction +=
-                self.pilot_fraction_alpha * (pilot_fraction_inst - self.pilot_fraction);
-            let pilot_quality_inst = pilot_coherent_power / (pilot_side_power + 1e-9);
-            self.pilot_quality +=
-                self.pilot_quality_alpha * (pilot_quality_inst - self.pilot_quality);
+            // 5) 38k同期検波とL-R位相補正
+            let (sum, lr_aligned) = self.extract_sum_and_lr(x, s19, c19);
 
-            let level_denom = (self.pilot_lock_high - self.pilot_lock_low).max(1e-6);
-            let frac_denom = (self.pilot_fraction_high - self.pilot_fraction_low).max(1e-6);
-            let level_gate = clamp01((self.pilot_level - self.pilot_lock_low) / level_denom);
-            let frac_gate = clamp01((self.pilot_fraction - self.pilot_fraction_low) / frac_denom);
-            let quality_denom = (self.pilot_quality_high - self.pilot_quality_low).max(1e-6);
-            let quality_gate =
-                clamp01((self.pilot_quality - self.pilot_quality_low) / quality_denom);
-            let target_blend = level_gate * quality_gate * frac_gate;
-            let blend_alpha = if target_blend > self.stereo_blend {
-                self.blend_attack_alpha
-            } else {
-                self.blend_release_alpha
-            };
-            self.stereo_blend += blend_alpha * (target_blend - self.stereo_blend);
-
-            let locked_now = if self.stereo_locked {
-                self.stereo_blend >= self.stereo_lock_off
-            } else {
-                self.stereo_blend >= self.stereo_lock_on
-            };
-            if self.stereo_locked && !locked_now {
-                self.mono_fallback_count = self.mono_fallback_count.saturating_add(1);
-            }
-            self.stereo_locked = locked_now;
-
-            // `L-R` は 38kHz 抑圧搬送波 (DSB-SC) なので、38k同期検波でベースバンドへ戻す。
-            // 周波数領域では:
-            // - 入力: 38±15kHz の帯域（23..53kHz）
-            // - 同期検波後: 0..15kHz (+ 2*38k 近傍の高域項)
-            // - 後段LPFで 0..15kHz を取り出す
-            let cos2phi = c19 * c19 - s19 * s19;
-            let sin2phi = 2.0 * s19 * c19;
-            let c38 = cos2phi * self.pll_mix_cos2err - sin2phi * self.pll_mix_sin2err;
-            let s38 = sin2phi * self.pll_mix_cos2err + cos2phi * self.pll_mix_sin2err;
-            let lr_i_raw = 2.0 * x * c38;
-            let lr_q_raw = -2.0 * x * s38;
-
-            // 128tap Hamming FIR を明示的に通して `L+R`, `L-R` を抽出する。
-            // - L+R: MPX低域(0..15kHz)
-            // - L-R: 同期検波後の低域(0..15kHz)、I/QをそれぞれLPF
-            let sum = self.sum_lpf.process_sample(x);
-            let diff = self
-                .diff_lpf
-                .process_sample(Complex::new(lr_i_raw, lr_q_raw));
-            let diff_i = diff.re;
-            let diff_q = diff.im;
-
-            // L-R複素成分の二乗平均から位相ズレを推定し、実軸へ寄せる。
-            // z = s * exp(jδ) (s: 実信号) のとき、arg(E[z^2]) = 2δ を使う。
-            let lr2_re = diff_i * diff_i - diff_q * diff_q;
-            let lr2_im = 2.0 * diff_i * diff_q;
-            self.lr2_re_lp += self.lr_phase_track_alpha * (lr2_re - self.lr2_re_lp);
-            self.lr2_im_lp += self.lr_phase_track_alpha * (lr2_im - self.lr2_im_lp);
-            if self.lr_phase_update_countdown == 0 {
-                let lr_phase_corr = 0.5 * self.lr2_im_lp.atan2(self.lr2_re_lp);
-                let (s_lr, c_lr) = lr_phase_corr.sin_cos();
-                self.lr_phase_corr_cos = c_lr;
-                self.lr_phase_corr_sin = s_lr;
-                self.lr_phase_update_countdown = LR_PHASE_TRACK_UPDATE_INTERVAL - 1;
-            } else {
-                self.lr_phase_update_countdown -= 1;
-            }
-            let lr_aligned = diff_i * self.lr_phase_corr_cos + diff_q * self.lr_phase_corr_sin;
-
-            // lock 品質に応じて blend を掛け、誤ロック時は差分成分を自動で弱める。
-            let lr = lr_aligned * self.stereo_blend;
-            let mut l = sum + lr;
-            let mut r = sum - lr;
-
-            if let Some(alpha) = self.deemphasis_alpha {
-                self.deemphasis_l += alpha * (l - self.deemphasis_l);
-                self.deemphasis_r += alpha * (r - self.deemphasis_r);
-                l = self.deemphasis_l;
-                r = self.deemphasis_r;
-            }
+            // 6) L/R合成とdeemphasis
+            let (l, r) = self.mix_and_postprocess(sum, lr_aligned);
 
             left.push(l);
             right.push(r);
 
-            let loop_term = self.pll_freq_corr + self.pll_kp * pilot_phase_err;
-            let phase_step = self.pilot_omega + loop_term;
-            self.pilot_phase += phase_step;
-            if self.pilot_phase >= 2.0 * std::f32::consts::PI {
-                self.pilot_phase -= 2.0 * std::f32::consts::PI;
-            } else if self.pilot_phase < 0.0 {
-                self.pilot_phase += 2.0 * std::f32::consts::PI;
-            }
-            self.pilot_lo_phase += self.pilot_lo_omega + loop_term;
-            if self.pilot_lo_phase >= 2.0 * std::f32::consts::PI {
-                self.pilot_lo_phase -= 2.0 * std::f32::consts::PI;
-            } else if self.pilot_lo_phase < 0.0 {
-                self.pilot_lo_phase += 2.0 * std::f32::consts::PI;
-            }
-            self.pilot_hi_phase += self.pilot_hi_omega + loop_term;
-            if self.pilot_hi_phase >= 2.0 * std::f32::consts::PI {
-                self.pilot_hi_phase -= 2.0 * std::f32::consts::PI;
-            } else if self.pilot_hi_phase < 0.0 {
-                self.pilot_hi_phase += 2.0 * std::f32::consts::PI;
-            }
+            let loop_term = self.pll.freq_corr + self.pll.kp * self.pll.phase_err_last;
+            (s19, c19) = self.nco.pilot.sin_cos_and_advance(loop_term);
+            self.nco.pilot_lo.advance(loop_term);
+            self.nco.pilot_hi.advance(loop_term);
         }
     }
 
+    /// MPXの低域DCを軽く除去する。
+    #[inline(always)]
+    fn process_dc(&mut self, raw: f32) -> f32 {
+        let x = raw - self.dc.prev_x + self.dc.hp_a * self.dc.prev_y;
+        self.dc.prev_x = raw;
+        self.dc.prev_y = x;
+        x
+    }
+
+    /// 19k pilot同期検波と、18k/20k側帯域によるノイズ床推定を更新する。
+    #[inline(always)]
+    fn update_pilot_tracking(&mut self, x: f32, s19: f32, c19: f32) {
+        let pilot_i = x * c19;
+        let pilot_q = -x * s19;
+        let pilot_mix_power_inst = pilot_i * pilot_i + pilot_q * pilot_q;
+        self.pilot.mix_power += self.cfg.pilot_power_alpha * (pilot_mix_power_inst - self.pilot.mix_power);
+        self.pilot.i_lp += self.cfg.pilot_lp_alpha * (pilot_i - self.pilot.i_lp);
+        self.pilot.q_lp += self.cfg.pilot_lp_alpha * (pilot_q - self.pilot.q_lp);
+
+        if self.pilot.side_update_countdown == 0 {
+            let (s18, c18) = self.nco.pilot_lo.sin_cos();
+            let (s20, c20) = self.nco.pilot_hi.sin_cos();
+            let pilot_i_lo = x * c18;
+            let pilot_q_lo = -x * s18;
+            let pilot_i_hi = x * c20;
+            let pilot_q_hi = -x * s20;
+            self.pilot.i_lo_lp += self.cfg.pilot_lp_alpha_side * (pilot_i_lo - self.pilot.i_lo_lp);
+            self.pilot.q_lo_lp += self.cfg.pilot_lp_alpha_side * (pilot_q_lo - self.pilot.q_lo_lp);
+            self.pilot.i_hi_lp += self.cfg.pilot_lp_alpha_side * (pilot_i_hi - self.pilot.i_hi_lp);
+            self.pilot.q_hi_lp += self.cfg.pilot_lp_alpha_side * (pilot_q_hi - self.pilot.q_hi_lp);
+            self.pilot.side_update_countdown = PILOT_SIDE_UPDATE_INTERVAL - 1;
+        } else {
+            self.pilot.side_update_countdown -= 1;
+        }
+    }
+
+    /// 位相誤差を計算し、PLLの周波数補正値を更新する。
+    #[inline(always)]
+    fn update_pll(&mut self) {
+        if self.pll.update_countdown == 0 {
+            let pilot_phase_err = pilot_phase_error_from_iq(self.pilot.i_lp, self.pilot.q_lp);
+            self.pll.phase_err_last = pilot_phase_err;
+            let (sin2err, cos2err) = (2.0 * pilot_phase_err).sin_cos();
+            self.pll.mix_cos2err = cos2err;
+            self.pll.mix_sin2err = sin2err;
+            self.pll.freq_corr = (self.pll.freq_corr + self.pll.ki * pilot_phase_err)
+                .clamp(-self.pll.freq_corr_max, self.pll.freq_corr_max);
+            self.pll.update_countdown = PLL_UPDATE_INTERVAL - 1;
+        } else {
+            self.pll.update_countdown -= 1;
+        }
+    }
+
+    /// pilotの強度/純度からblend値とlock状態を更新する。
+    #[inline(always)]
+    fn update_blend_and_lock(&mut self) {
+        let pilot_coherent_power = self.pilot.i_lp * self.pilot.i_lp + self.pilot.q_lp * self.pilot.q_lp;
+        let pilot_side_power = 0.5
+            * ((self.pilot.i_lo_lp * self.pilot.i_lo_lp + self.pilot.q_lo_lp * self.pilot.q_lo_lp)
+                + (self.pilot.i_hi_lp * self.pilot.i_hi_lp + self.pilot.q_hi_lp * self.pilot.q_hi_lp));
+        let pilot_level_inst = pilot_coherent_power.sqrt() * 2.0;
+        self.pilot.level += self.cfg.pilot_level_alpha * (pilot_level_inst - self.pilot.level);
+        let pilot_fraction_inst = pilot_coherent_power / (self.pilot.mix_power + 1e-9);
+        self.pilot.fraction += self.cfg.pilot_fraction_alpha * (pilot_fraction_inst - self.pilot.fraction);
+        let pilot_quality_inst = pilot_coherent_power / (pilot_side_power + 1e-9);
+        self.pilot.quality += self.cfg.pilot_quality_alpha * (pilot_quality_inst - self.pilot.quality);
+
+        let level_denom = (self.cfg.pilot_lock_high - self.cfg.pilot_lock_low).max(1e-6);
+        let frac_denom = (self.cfg.pilot_fraction_high - self.cfg.pilot_fraction_low).max(1e-6);
+        let level_gate = clamp01((self.pilot.level - self.cfg.pilot_lock_low) / level_denom);
+        let frac_gate = clamp01((self.pilot.fraction - self.cfg.pilot_fraction_low) / frac_denom);
+        let quality_denom = (self.cfg.pilot_quality_high - self.cfg.pilot_quality_low).max(1e-6);
+        let quality_gate = clamp01((self.pilot.quality - self.cfg.pilot_quality_low) / quality_denom);
+        let target_blend = level_gate * quality_gate * frac_gate;
+        let blend_alpha = if target_blend > self.blend.stereo_blend {
+            self.cfg.blend_attack_alpha
+        } else {
+            self.cfg.blend_release_alpha
+        };
+        self.blend.stereo_blend += blend_alpha * (target_blend - self.blend.stereo_blend);
+
+        let locked_now = if self.blend.stereo_locked {
+            self.blend.stereo_blend >= self.cfg.stereo_lock_off
+        } else {
+            self.blend.stereo_blend >= self.cfg.stereo_lock_on
+        };
+        if self.blend.stereo_locked && !locked_now {
+            self.blend.mono_fallback_count = self.blend.mono_fallback_count.saturating_add(1);
+        }
+        self.blend.stereo_locked = locked_now;
+    }
+
+    /// 38k同期検波でL-Rをベースバンド化し、L+RとL-Rを抽出する。
+    #[inline(always)]
+    fn extract_sum_and_lr(&mut self, x: f32, s19: f32, c19: f32) -> (f32, f32) {
+        let cos2phi = c19 * c19 - s19 * s19;
+        let sin2phi = 2.0 * s19 * c19;
+        let c38 = cos2phi * self.pll.mix_cos2err - sin2phi * self.pll.mix_sin2err;
+        let s38 = sin2phi * self.pll.mix_cos2err + cos2phi * self.pll.mix_sin2err;
+        let lr_i_raw = 2.0 * x * c38;
+        let lr_q_raw = -2.0 * x * s38;
+
+        let sum = self.filters.sum_lpf.process_sample(x);
+        let diff = self.filters.diff_lpf.process_sample(Complex::new(lr_i_raw, lr_q_raw));
+        let diff_i = diff.re;
+        let diff_q = diff.im;
+
+        let lr2_re = diff_i * diff_i - diff_q * diff_q;
+        let lr2_im = 2.0 * diff_i * diff_q;
+        self.lr.re_lp += self.cfg.lr_phase_track_alpha * (lr2_re - self.lr.re_lp);
+        self.lr.im_lp += self.cfg.lr_phase_track_alpha * (lr2_im - self.lr.im_lp);
+        if self.lr.update_countdown == 0 {
+            let lr_phase_corr = 0.5 * self.lr.im_lp.atan2(self.lr.re_lp);
+            let (s_lr, c_lr) = lr_phase_corr.sin_cos();
+            self.lr.corr_cos = c_lr;
+            self.lr.corr_sin = s_lr;
+            self.lr.update_countdown = LR_PHASE_TRACK_UPDATE_INTERVAL - 1;
+        } else {
+            self.lr.update_countdown -= 1;
+        }
+        let lr_aligned = diff_i * self.lr.corr_cos + diff_q * self.lr.corr_sin;
+        (sum, lr_aligned)
+    }
+
+    /// L/R合成後、必要ならdeemphasisを適用する。
+    #[inline(always)]
+    fn mix_and_postprocess(&mut self, sum: f32, lr_aligned: f32) -> (f32, f32) {
+        let lr = lr_aligned * self.blend.stereo_blend;
+        let mut l = sum + lr;
+        let mut r = sum - lr;
+
+        if let Some(alpha) = self.cfg.deemphasis_alpha {
+            self.audio.deemphasis_l += alpha * (l - self.audio.deemphasis_l);
+            self.audio.deemphasis_r += alpha * (r - self.audio.deemphasis_r);
+            l = self.audio.deemphasis_l;
+            r = self.audio.deemphasis_r;
+        }
+        (l, r)
+    }
+
     pub fn stats(&self) -> FMStereoStats {
-        let i_abs = self.pilot_i_lp.abs();
-        let q_abs = self.pilot_q_lp.abs();
+        let i_abs = self.pilot.i_lp.abs();
+        let q_abs = self.pilot.q_lp.abs();
         let q_over_i = q_abs / (i_abs + 1e-9);
-        let phase_err_abs = self.pilot_phase_err_last.abs();
-        let pll_locked = self.pilot_level >= self.pilot_lock_low
+        let phase_err_abs = self.pll.phase_err_last.abs();
+        let pll_locked = self.pilot.level >= self.cfg.pilot_lock_low
             && phase_err_abs < PLL_LOCK_ERR_RAD
             && q_over_i < PLL_LOCK_Q_OVER_I_MAX;
-        let pll_freq_corr_hz =
-            self.pll_freq_corr * self.sample_rate_hz / (2.0 * std::f32::consts::PI);
+        let pll_freq_corr_hz = self.pll.freq_corr * self.cfg.sample_rate_hz / (2.0 * std::f32::consts::PI);
+
         FMStereoStats {
-            pilot_level: self.pilot_level,
-            stereo_blend: self.stereo_blend,
-            stereo_locked: self.stereo_locked,
-            mono_fallback_count: self.mono_fallback_count,
-            pll_phase_err_rad: self.pilot_phase_err_last,
+            pilot_level: self.pilot.level,
+            stereo_blend: self.blend.stereo_blend,
+            stereo_locked: self.blend.stereo_locked,
+            mono_fallback_count: self.blend.mono_fallback_count,
+            pll_phase_err_rad: self.pll.phase_err_last,
             pll_freq_corr_hz,
             pll_q_over_i: q_over_i,
             pll_locked,
@@ -757,7 +823,7 @@ mod tests {
             }
 
             let expected = 2.0 * std::f32::consts::PI * (pilot_hz - 19_000.0) / fs;
-            let corr = dec.pll_freq_corr;
+            let corr = dec.pll.freq_corr;
             let corr_abs_err = (corr.abs() - expected.abs()).abs();
             assert!(
                 corr.abs() > 1e-4,
@@ -804,20 +870,20 @@ mod tests {
             dec.process(chunk, &mut l, &mut r);
         }
 
-        let i_abs = dec.pilot_i_lp.abs();
-        let q_abs = dec.pilot_q_lp.abs();
+        let i_abs = dec.pilot.i_lp.abs();
+        let q_abs = dec.pilot.q_lp.abs();
         let q_over_i = q_abs / (i_abs + 1e-9);
         assert!(
             q_over_i < 0.35,
             "PLL did not align pilot on I-axis: i_lp={} q_lp={} q_over_i={}",
-            dec.pilot_i_lp,
-            dec.pilot_q_lp,
+            dec.pilot.i_lp,
+            dec.pilot.q_lp,
             q_over_i
         );
         assert!(
-            dec.pilot_phase_err_last.abs() < 0.35,
+            dec.pll.phase_err_last.abs() < 0.35,
             "PLL phase error did not converge near zero: err={}",
-            dec.pilot_phase_err_last
+            dec.pll.phase_err_last
         );
     }
 

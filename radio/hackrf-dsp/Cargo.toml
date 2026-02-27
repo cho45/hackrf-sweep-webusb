@@ -35,8 +35,13 @@ lto = true
 codegen-units = 1
 
 [profile.bench]
+# 実行速度の最大化 (本番の opt-level = "z" と乖離している点に注意。純粋なアルゴリズム評価用)
 opt-level = 3
-lto = false
-codegen-units = 16
-debug = false
-incremental = true
+# クレート間の最適化を有効化し、インライン化によるパフォーマンスを正確に計測する
+lto = "thin"
+# 分割コンパイルによる境界での最適化阻害を防ぐ
+codegen-units = 1
+# プロファイリング(Flamegraph等)でボトルネックを観測するためにデバッグシンボルを残す(実行速度に影響なし)
+debug = true
+# キャッシュによる最適化のブレを防ぎ、計測の再現性を担保するため無効化
+incremental = false
