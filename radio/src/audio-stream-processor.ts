@@ -28,21 +28,7 @@ type StatsMessage = {
   inputGapMsPeak: number;
 };
 
-const readSampleRate = (): number => {
-  const sr = (globalThis as { sampleRate?: number }).sampleRate;
-  if (typeof sr === "number" && Number.isFinite(sr) && sr > 0) {
-    return sr;
-  }
-  return 48_000;
-};
-
-const readCurrentTime = (): number => {
-  const t = (globalThis as { currentTime?: number }).currentTime;
-  if (typeof t === "number" && Number.isFinite(t)) {
-    return t;
-  }
-  return 0;
-};
+const workletGlobal = globalThis as { sampleRate: number; currentTime: number };
 
 export class AudioStreamProcessor extends AudioWorkletProcessor {
   private readonly packetQueue = new AudioPacketReceiver();
@@ -63,7 +49,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private maxSoftUnderrunBlocks = 12;
 
-  private readonly sampleRateHz = readSampleRate();
+  private readonly sampleRateHz = workletGlobal.sampleRate;
 
   private baseMinStartSamples = Math.floor(this.sampleRateHz * 0.1);
 
@@ -116,7 +102,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       Math.floor((this.sampleRateHz * 0.35) / this.bufferLength),
     );
     this.recomputeBufferTargets();
-    this.lastStatsAt = readCurrentTime();
+    this.lastStatsAt = workletGlobal.currentTime;
 
     this.port.onmessage = (event: MessageEvent) => {
       const msg = event.data as WorkletControlMessage | null;
@@ -144,7 +130,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
     if (msg.type === "push") {
       if (!this.packetQueue.pushFromMessage(msg)) return;
 
-      const nowSec = readCurrentTime();
+      const nowSec = workletGlobal.currentTime;
       if (this.lastPushAtSec >= 0) {
         const gapSec = Math.max(0, nowSec - this.lastPushAtSec);
         if (gapSec > this.pushIntervalPeakSec) {
@@ -172,7 +158,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       this.bufferScale = 1.0;
       this.recomputeBufferTargets();
       this.lastBufferGrowAt = -1;
-      this.lastStatsAt = readCurrentTime();
+      this.lastStatsAt = workletGlobal.currentTime;
       this.pushIntervalPeakSec = 0;
       this.lastPushAtSec = -1;
     }
@@ -192,7 +178,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private growBufferOnUnderrun(): void {
     if (this.bufferScale >= this.maxBufferScale) return;
-    const nowSec = readCurrentTime();
+    const nowSec = workletGlobal.currentTime;
     if (
       this.lastBufferGrowAt >= 0 &&
       nowSec - this.lastBufferGrowAt < this.bufferGrowCooldownSec
@@ -280,7 +266,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
   }
 
   private postStatsIfNeeded(): void {
-    const nowSec = readCurrentTime();
+    const nowSec = workletGlobal.currentTime;
     if (nowSec - this.lastStatsAt < 0.5) return;
 
     this.lastStatsAt = nowSec;
