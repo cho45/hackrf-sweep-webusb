@@ -8,7 +8,9 @@ pub mod fm_stereo;
 
 pub use am::AMDemodulator;
 pub use fm::FMDemodulator;
-pub use fm_stereo::{FMStereoDecoder, FMStereoStats};
+pub use fm_stereo::{
+    FMStereoDecoder, FMStereoStats, FM_STEREO_INTERMEDIATE_RATE_HZ, FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ,
+};
 
 /// 位相加算ベースのNCO（周波数補正を毎サンプルで加える用途向け）。
 pub struct PhaseNco {

@@ -15,7 +15,9 @@ use std::arch::wasm32::{
 use num_complex::Complex;
 use wasm_bindgen::prelude::*;
 
-use crate::demod::{AMDemodulator, FMDemodulator, FMStereoDecoder, FMStereoStats, Nco};
+use crate::demod::{
+    AMDemodulator, FMDemodulator, FMStereoDecoder, FMStereoStats, Nco, FM_STEREO_INTERMEDIATE_RATE_HZ,
+};
 use crate::fft::FFT;
 use crate::filter::DecimationFilter;
 use crate::resample::Resampler;
@@ -23,11 +25,32 @@ use crate::resample::Resampler;
 /// FM の最大周波数偏移 [Hz]。WFM（ワイドFM放送）想定。
 const FM_MAX_DEVIATION_HZ: f32 = 75_000.0;
 
-/// モード別の復調レート [Hz]
-const AM_DEMOD_RATE: f32 = 50_000.0;
-const FM_DEMOD_RATE: f32 = 200_000.0;
-const AM_AUDIO_CUTOFF_HZ: f32 = 5_000.0;
-const FM_AUDIO_CUTOFF_HZ: f32 = 15_000.0;
+#[derive(Clone, Copy)]
+struct AudioPathProfile {
+    demod_rate_hz: f32,
+    intermediate_rate_hz: f32,
+    audio_cutoff_hz: f32,
+}
+
+const AM_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
+    demod_rate_hz: 50_000.0,
+    intermediate_rate_hz: 50_000.0,
+    audio_cutoff_hz: 5_000.0,
+};
+const FM_MONO_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
+    demod_rate_hz: 200_000.0,
+    intermediate_rate_hz: 200_000.0,
+    audio_cutoff_hz: 15_000.0,
+};
+const FM_STEREO_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
+    demod_rate_hz: 200_000.0,
+    intermediate_rate_hz: FM_STEREO_INTERMEDIATE_RATE_HZ,
+    audio_cutoff_hz: 15_000.0,
+};
+
+/// 既存テスト・ログで使うエイリアス
+const AM_DEMOD_RATE: f32 = AM_AUDIO_PATH.demod_rate_hz;
+const FM_DEMOD_RATE: f32 = FM_MONO_AUDIO_PATH.demod_rate_hz;
 const FM_DEEMPHASIS_TAU_US: f32 = 50.0;
 const COARSE_STAGE_RATE: f32 = 1_000_000.0;
 const FFT_DC_INTERP_HALF_WIDTH: usize = 2;
@@ -333,21 +356,37 @@ impl Receiver {
             if_max_hz
         ));
 
-        let audio_cutoff_hz = match mode {
-            DemodMode::Am => AM_AUDIO_CUTOFF_HZ,
-            DemodMode::Fm => FM_AUDIO_CUTOFF_HZ,
+        let mono_audio_profile = match mode {
+            DemodMode::Am => AM_AUDIO_PATH,
+            DemodMode::Fm => FM_MONO_AUDIO_PATH,
         };
+        let fm_stereo = FMStereoDecoder::new(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US));
+        let fm_stereo_sample_rate = fm_stereo
+            .processing_sample_rate_hz()
+            .min(FM_STEREO_AUDIO_PATH.intermediate_rate_hz);
 
-        let resampler = Resampler::new_with_cutoff(
+        let mut resampler = Resampler::new_with_cutoff(
             plan.demod_sample_rate.round() as u32,
             output_sample_rate.round() as u32,
-            Some(audio_cutoff_hz),
+            Some(mono_audio_profile.audio_cutoff_hz),
         );
-        let resampler_right = Resampler::new_with_cutoff(
+        let mut resampler_right = Resampler::new_with_cutoff(
             plan.demod_sample_rate.round() as u32,
             output_sample_rate.round() as u32,
-            Some(audio_cutoff_hz),
+            Some(mono_audio_profile.audio_cutoff_hz),
         );
+        if mode == DemodMode::Fm {
+            resampler.reconfigure(
+                fm_stereo_sample_rate.round() as u32,
+                output_sample_rate.round() as u32,
+                Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
+            );
+            resampler_right.reconfigure(
+                fm_stereo_sample_rate.round() as u32,
+                output_sample_rate.round() as u32,
+                Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
+            );
+        }
 
         // FFT窓関数 (Hann窓)
         let mut window = vec![0.0f32; fft_size];
@@ -407,7 +446,7 @@ impl Receiver {
             },
             am_demod: AMDemodulator::new(),
             fm_demod,
-            fm_stereo: FMStereoDecoder::new(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US)),
+            fm_stereo,
             resampler,
             resampler_right,
             fft: FFT::new(fft_size, &window),
@@ -486,6 +525,36 @@ impl Receiver {
             self.fm_stereo.reset();
             self.fm_demod.set_deemphasis_enabled(!enabled);
             self.fm_demod.reset_audio_state();
+            let output_rate = self.resampler.target_rate;
+            if enabled {
+                let stereo_input_rate = self
+                    .fm_stereo
+                    .processing_sample_rate_hz()
+                    .min(FM_STEREO_AUDIO_PATH.intermediate_rate_hz)
+                    .round() as u32;
+                self.resampler.reconfigure(
+                    stereo_input_rate,
+                    output_rate,
+                    Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
+                );
+                self.resampler_right.reconfigure(
+                    stereo_input_rate,
+                    output_rate,
+                    Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
+                );
+            } else {
+                let mono_input_rate = self.demod_sample_rate.round() as u32;
+                self.resampler.reconfigure(
+                    mono_input_rate,
+                    output_rate,
+                    Some(FM_MONO_AUDIO_PATH.audio_cutoff_hz),
+                );
+                self.resampler_right.reconfigure(
+                    mono_input_rate,
+                    output_rate,
+                    Some(FM_MONO_AUDIO_PATH.audio_cutoff_hz),
+                );
+            }
         }
     }
 
@@ -732,7 +801,7 @@ impl Receiver {
             }
             DemodMode::Fm => {
                 if self.fm_stereo_enabled {
-                    // FMは MPX -> Stereo Decode -> resample(L/R) -> interleave
+                    // FM stereo は fm_stereo 内で必要なら MPX を中間レートへ変換して処理する。
                     self.fm_stereo.process(
                         &self.demod_buffer,
                         &mut self.stereo_left_buffer,
@@ -946,6 +1015,26 @@ mod tests {
             approx_eq(plan.coarse_stage_rate, 1_000_000.0);
             approx_eq(plan.demod_sample_rate, FM_DEMOD_RATE);
         }
+    }
+
+    #[test]
+    fn fm_stereo_mpx_resampler_downsamples_to_125k() {
+        let mut rs = Resampler::new_with_cutoff(
+            FM_DEMOD_RATE.round() as u32,
+            FM_STEREO_AUDIO_PATH.intermediate_rate_hz.round() as u32,
+            Some(crate::demod::FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ),
+        );
+        let input = vec![0.0f32; 20_000];
+        let mut out = Vec::new();
+        rs.process(&input, &mut out);
+        let ratio = out.len() as f32 / input.len() as f32;
+        assert!(
+            (ratio - 0.625).abs() < 0.05,
+            "unexpected downsample ratio: {} (out={}, in={})",
+            ratio,
+            out.len(),
+            input.len()
+        );
     }
 
     #[test]

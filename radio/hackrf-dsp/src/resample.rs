@@ -139,6 +139,10 @@ impl Resampler {
             self.history[prefix_len - input.len()..].copy_from_slice(input);
         }
     }
+
+    pub fn reconfigure(&mut self, source_rate: u32, target_rate: u32, cutoff_hz: Option<f32>) {
+        *self = Self::new_with_cutoff(source_rate, target_rate, cutoff_hz);
+    }
 }
 
 #[cfg(test)]

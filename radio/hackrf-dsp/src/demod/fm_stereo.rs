@@ -1,6 +1,10 @@
 use super::PhaseNco;
 use crate::filter::{ComplexFirFilter, FirFilter};
+use crate::resample::Resampler;
 use num_complex::Complex;
+
+pub const FM_STEREO_INTERMEDIATE_RATE_HZ: f32 = 125_000.0;
+pub const FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ: f32 = 60_000.0;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FMStereoStats {
@@ -46,6 +50,7 @@ const PILOT_SIDE_UPDATE_INTERVAL: usize = 4;
 /// - pilot レベルに応じて stereo blend を自動調整し、ロック不十分時は mono に寄せる
 pub struct FMStereoDecoder {
     cfg: FMStereoConfig,
+    mpx_input: MpxInputState,
     nco: NcoState,
     pilot: PilotState,
     pll: PllState,
@@ -54,6 +59,11 @@ pub struct FMStereoDecoder {
     lr: LrState,
     audio: AudioState,
     blend: BlendState,
+}
+
+struct MpxInputState {
+    resampler: Option<Resampler>,
+    buffer: Vec<f32>,
 }
 
 struct FMStereoConfig {
@@ -304,17 +314,31 @@ impl BlendState {
 impl FMStereoDecoder {
     pub fn new(sample_rate_hz: f32, deemphasis_tau_us: Option<f32>) -> Self {
         assert!(sample_rate_hz > 0.0, "sample_rate_hz must be > 0");
-        let cfg = FMStereoConfig::new(sample_rate_hz, deemphasis_tau_us);
+        let processing_rate_hz = sample_rate_hz.min(FM_STEREO_INTERMEDIATE_RATE_HZ);
+        let cfg = FMStereoConfig::new(processing_rate_hz, deemphasis_tau_us);
+        let mpx_resampler = if sample_rate_hz.round() as u32 > processing_rate_hz.round() as u32 {
+            Some(Resampler::new_with_cutoff(
+                sample_rate_hz.round() as u32,
+                processing_rate_hz.round() as u32,
+                Some(FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ),
+            ))
+        } else {
+            None
+        };
         let mut lr = LrState::default();
         lr.reset();
 
         Self {
             cfg,
-            nco: NcoState::new(sample_rate_hz),
+            mpx_input: MpxInputState {
+                resampler: mpx_resampler,
+                buffer: Vec::with_capacity(8_192),
+            },
+            nco: NcoState::new(processing_rate_hz),
             pilot: PilotState::default(),
-            pll: PllState::new(sample_rate_hz),
-            dc: DcBlockState::new(sample_rate_hz),
-            filters: FilterState::new(sample_rate_hz),
+            pll: PllState::new(processing_rate_hz),
+            dc: DcBlockState::new(processing_rate_hz),
+            filters: FilterState::new(processing_rate_hz),
             lr,
             audio: AudioState::default(),
             blend: BlendState::default(),
@@ -322,6 +346,14 @@ impl FMStereoDecoder {
     }
 
     pub fn reset(&mut self) {
+        if let Some(resampler) = self.mpx_input.resampler.as_mut() {
+            resampler.reconfigure(
+                resampler.source_rate,
+                resampler.target_rate,
+                Some(FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ),
+            );
+        }
+        self.mpx_input.buffer.clear();
         self.nco.reset();
         self.pilot = PilotState::default();
         self.pll.reset();
@@ -336,6 +368,29 @@ impl FMStereoDecoder {
         if mpx.is_empty() {
             return;
         }
+        let mut taken = None;
+        if let Some(resampler) = self.mpx_input.resampler.as_mut() {
+            self.mpx_input.buffer.clear();
+            self.mpx_input.buffer.reserve(
+                ((mpx.len() as f32 / resampler.source_rate as f32) * resampler.target_rate as f32 * 1.5)
+                    as usize,
+            );
+            resampler.process(mpx, &mut self.mpx_input.buffer);
+            taken = Some(std::mem::take(&mut self.mpx_input.buffer));
+        }
+        let mpx_input = taken.as_deref().unwrap_or(mpx);
+        self.process_core(mpx_input, left, right);
+        if let Some(mut v) = taken {
+            v.clear();
+            self.mpx_input.buffer = v;
+        }
+    }
+
+    pub fn processing_sample_rate_hz(&self) -> f32 {
+        self.cfg.sample_rate_hz
+    }
+
+    fn process_core(&mut self, mpx: &[f32], left: &mut Vec<f32>, right: &mut Vec<f32>) {
         left.clear();
         right.clear();
         left.reserve(mpx.len());
