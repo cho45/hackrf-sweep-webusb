@@ -100,8 +100,9 @@ fn audio_profile_for(mode: DemodMode, fm_stereo_enabled: bool) -> AudioPathProfi
 }
 
 /// デシメーション用 FIR タップ数を factor から算出する。
+/// 最小 127 タップを保証し、低 factor 時のアンチエイリアシング不足を防ぐ。
 fn compute_fir_taps(factor: usize) -> usize {
-    let raw = (factor * 15).max(31).min(1001);
+    let raw = (factor * 15).max(127).min(1001);
     raw | 1 // 奇数保証
 }
 
@@ -233,7 +234,7 @@ impl ReceiverStats {
 }
 
 fn sanitize_if_band(min_hz: f32, max_hz: f32, demod_sample_rate: f32) -> (f32, f32) {
-    let max_allowed = (demod_sample_rate * 0.49).max(200.0);
+    let max_allowed = (demod_sample_rate * 0.43).max(200.0);
     let mut min = min_hz.max(0.0);
     let mut max = max_hz.max(0.0);
 
@@ -976,7 +977,7 @@ mod tests {
     #[test]
     fn sanitize_if_band_is_bounded_by_demod_rate() {
         let (_, max) = sanitize_if_band(0.0, 200_000.0, AM_AUDIO_PATH.demod_rate_hz);
-        assert!(max <= AM_AUDIO_PATH.demod_rate_hz * 0.49);
+        assert!(max <= AM_AUDIO_PATH.demod_rate_hz * 0.43 + 1.0);
     }
 
     #[test]
@@ -985,7 +986,7 @@ mod tests {
         let (min_hz, max_hz) = sanitize_if_band(-10_000.0, -1.0, demod_rate);
         assert!(min_hz >= 0.0);
         assert!(max_hz > min_hz);
-        assert!(max_hz <= demod_rate * 0.49);
+        assert!(max_hz <= demod_rate * 0.43 + 1.0);
 
         let (min_hz2, max_hz2) = sanitize_if_band(1_000_000.0, 1_000_100.0, demod_rate);
         assert_eq!(min_hz2, 0.0);
