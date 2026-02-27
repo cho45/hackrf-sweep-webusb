@@ -6,6 +6,8 @@ import { HackRF } from "./hackrf";
 type PerfStats = {
 	// USB入力欠落が起きていないか（受信パス健全性）
 	droppedIqBlocksCount: number;
+	// 1ブロックを実時間で捌くための処理予算
+	blockBudgetMs: number;
 	// USB/スケジューリング由来の停止スパイク検知
 	blockIntervalMsPeak: number;
 	// 直近ブロックのDSP処理時間
@@ -564,6 +566,7 @@ export class RadioBackend {
 		const demodFactor = Math.max(1, Math.round(coarseRate / demodRate));
 		const audioChannels = Math.max(1, Math.min(2, this.receiver.audio_output_channels()));
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
+		const blockBudgetMs = (iqSamplesPerBlock / Math.max(1, options.sampleRate)) * 1000;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
 		const audioCapacity = Math.max(
 			1024,
@@ -658,6 +661,7 @@ export class RadioBackend {
 				: { targetDb: 0, noiseFloorDb: 0, snrDb: 0 };
 			const stats: PerfStats = {
 				droppedIqBlocksCount,
+				blockBudgetMs,
 				blockIntervalMsPeak,
 				dspProcessMsLast,
 				dspProcessMsPeak,

@@ -99,8 +99,9 @@
       </div>
       <div class="perf-panel body-2" v-if="running && showDebugInfo">
         <div><b>DSP</b></div>
-        <div>block interval peak: {{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }} ms</div>
-        <div>process last/peak: {{ fmtNum(dspPerf.dspProcessMsLast, 2) }} / {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms</div>
+        <div>block budget: {{ fmtNum(dspPerf.blockBudgetMs, 2) }} ms</div>
+        <div>block interval peak: use {{ fmtNum(dspUsePct(dspPerf.blockIntervalMsPeak), 0) }}% ({{ fmtNum(dspPerf.blockIntervalMsPeak, 2) }} ms)</div>
+        <div>process last/peak: use {{ fmtNum(dspUsePct(dspPerf.dspProcessMsLast), 0) }}% / {{ fmtNum(dspUsePct(dspPerf.dspProcessMsPeak), 0) }}% ({{ fmtNum(dspPerf.dspProcessMsLast, 2) }} / {{ fmtNum(dspPerf.dspProcessMsPeak, 2) }} ms)</div>
         <div>audio out long: {{ fmtNum(dspPerf.audioOutHzLong, 0) }} / {{ fmtNum(audioOutputSampleRate, 0) }} Hz</div>
         <div>dropped IQ blocks: {{ fmtNum(dspPerf.droppedIqBlocksCount, 0) }}</div>
         <div>fft target/noise/snr: {{ fmtNum(dspPerf.fftTargetDb, 1) }} / {{ fmtNum(dspPerf.fftNoiseFloorDb, 1) }} / {{ fmtNum(dspPerf.fftSnrDb, 1) }} dB</div>
@@ -309,6 +310,8 @@ type DisplayUnit = 'Hz' | 'kHz' | 'MHz';
 type DspPerfStats = {
   // USB入力欠落が起きていないか
   droppedIqBlocksCount: number;
+  // 1ブロックの実時間予算
+  blockBudgetMs: number;
   // USB/スケジューリング由来の停止スパイク
   blockIntervalMsPeak: number;
   // DSP処理詰まりの検知
@@ -402,6 +405,8 @@ let drawFrameCount = 0;
 let drawMsSum = 0;
 let drawMsMax = 0;
 const dspPerf = reactive({
+  // 1ブロックの実時間予算
+  blockBudgetMs: 0,
   // USB/スケジューリング停止スパイク監視
   blockIntervalMsPeak: 0,
   // DSP過負荷監視
@@ -453,6 +458,11 @@ const showSnackbar = (msg: string) => {
 };
 
 const fmtNum = (v: number, digits = 2) => Number.isFinite(v) ? v.toFixed(digits) : '-';
+const dspUsePct = (usedMs: number) => {
+  const budgetMs = dspPerf.blockBudgetMs;
+  if (!Number.isFinite(usedMs) || usedMs <= 0 || !Number.isFinite(budgetMs) || budgetMs <= 0) return 0;
+  return (usedMs / budgetMs) * 100;
+};
 
 // 桁合わせ用のヘルパー
 const formatFreq = (hz: number) => {
@@ -923,6 +933,7 @@ const start = async () => {
       }
       latestFftFrame.set(fftOut);
       if (perf) {
+        dspPerf.blockBudgetMs = perf.blockBudgetMs;
         dspPerf.blockIntervalMsPeak = perf.blockIntervalMsPeak;
         dspPerf.droppedIqBlocksCount = perf.droppedIqBlocksCount;
         dspPerf.dspProcessMsLast = perf.dspProcessMsLast;
