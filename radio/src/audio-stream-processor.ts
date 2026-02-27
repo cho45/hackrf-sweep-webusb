@@ -20,6 +20,11 @@ type InputMessage =
   | { type: "push"; data: Float32Array; channels?: number }
   | { type: "reset" };
 
+type OutputMessage = {
+  type: "recycle";
+  data: Float32Array;
+};
+
 type WorkletControlMessage = {
   type: "attach-input-port";
   port: MessagePort;
@@ -106,6 +111,21 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
 
   private lastPushAtSec = -1;
 
+  private recycleChunkData(data: Float32Array): void {
+    if (!this.inputPort) return;
+    const msg: OutputMessage = { type: "recycle", data };
+    this.inputPort.postMessage(msg, [data.buffer]);
+  }
+
+  private recycleAllQueuedChunks(): void {
+    while (this.queue.length > 0) {
+      const chunk = this.queue.shift();
+      if (!chunk) break;
+      this.recycleChunkData(chunk.data);
+    }
+    this.bufferedFrames = 0;
+  }
+
   constructor() {
     super();
     this.maxSoftUnderrunBlocks = Math.max(
@@ -124,6 +144,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
         typeof msg.port.postMessage === "function"
       ) {
         if (this.inputPort) {
+          this.recycleAllQueuedChunks();
           this.inputPort.close();
         }
         this.inputPort = msg.port;
@@ -164,8 +185,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
     }
 
     if (msg.type === "reset") {
-      this.queue = [];
-      this.bufferedFrames = 0;
+      this.recycleAllQueuedChunks();
       this.started = false;
       this.lastSample = 0.0;
       this.droppedSamples = 0;
@@ -218,6 +238,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
         remaining -= available;
         this.bufferedFrames -= available;
         this.droppedSamples += available * head.channels;
+        this.recycleChunkData(head.data);
         this.queue.shift();
       } else {
         head.readFrame += remaining;
@@ -284,6 +305,7 @@ export class AudioStreamProcessor extends AudioWorkletProcessor {
       written += takeFrames;
       this.bufferedFrames -= takeFrames;
       if (head.readFrame >= head.data.length / head.channels) {
+        this.recycleChunkData(head.data);
         this.queue.shift();
       }
     }

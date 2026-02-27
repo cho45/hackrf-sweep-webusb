@@ -182,5 +182,47 @@ describe("audio-stream-processor", () => {
     expect(right[0]).toBeCloseTo(0, 6);
     expect(left[127]).toBeCloseTo(127 / 128, 6);
     expect(right[127]).toBeCloseTo(-(127 / 128), 6);
+    expect(inputPort.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recycle" }),
+      expect.any(Array),
+    );
+  });
+
+  it("recycles queued chunks on reset", async () => {
+    const mod = await import("./audio-stream-processor");
+    const processor = new mod.AudioStreamProcessor() as unknown as {
+      port: {
+        onmessage: ((event: MessageEvent) => void) | null;
+        postMessage: ReturnType<typeof vi.fn>;
+      };
+    };
+
+    const inputPort = {
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      start: vi.fn(),
+      close: vi.fn(),
+      postMessage: vi.fn(),
+    } as unknown as MessagePort;
+    processor.port.onmessage?.(
+      new MessageEvent("message", {
+        data: { type: "attach-input-port", port: inputPort },
+      }),
+    );
+
+    (inputPort.onmessage as ((event: MessageEvent) => void) | null)?.(
+      new MessageEvent("message", {
+        data: { type: "push", data: new Float32Array(256).fill(0.2) },
+      }),
+    );
+    (inputPort.onmessage as ((event: MessageEvent) => void) | null)?.(
+      new MessageEvent("message", {
+        data: { type: "reset" },
+      }),
+    );
+
+    expect(inputPort.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "recycle" }),
+      expect.any(Array),
+    );
   });
 });

@@ -104,6 +104,13 @@ const AGC_SNR_IMPROVE_MIN_DB = 0.6;
 const FFT_SIGNAL_NEIGHBOR_BINS = 1;
 const UI_FFT_PUSH_FPS = 30;
 const UI_FFT_PUSH_INTERVAL_MS = 1000 / UI_FFT_PUSH_FPS;
+const AUDIO_PACKET_MS = 20;
+const AUDIO_PACKET_POOL = 48;
+
+type AudioPortInboundMessage = {
+	type: "recycle";
+	data: Float32Array;
+};
 
 const toAbortError = () => new DOMException("auto gain aborted", "AbortError");
 
@@ -200,6 +207,68 @@ export class RadioBackend {
 	private latestPerfSeq = 0;
 	private autoGainPromise: Promise<AutoGainResult> | null = null;
 	private autoGainAbortController: AbortController | null = null;
+	private audioChunkPool: Float32Array[] = [];
+	private audioChunkPacketSamples = 0;
+	private audioChunkWrite: Float32Array | null = null;
+	private audioChunkWritePos = 0;
+
+	private resetAudioChunkState() {
+		this.audioChunkPool = [];
+		this.audioChunkPacketSamples = 0;
+		this.audioChunkWrite = null;
+		this.audioChunkWritePos = 0;
+	}
+
+	private initAudioChunkPool(packetSamples: number, chunkCount: number) {
+		this.audioChunkPacketSamples = packetSamples;
+		this.audioChunkPool = [];
+		this.audioChunkWrite = null;
+		this.audioChunkWritePos = 0;
+		for (let i = 0; i < chunkCount; i += 1) {
+			this.audioChunkPool.push(new Float32Array(packetSamples));
+		}
+	}
+
+	private recycleAudioChunk(chunk: Float32Array) {
+		if (this.audioChunkPacketSamples <= 0) return;
+		if (chunk.length !== this.audioChunkPacketSamples) return;
+		this.audioChunkPool.push(chunk);
+	}
+
+	private flushAudioToPort(
+		src: Float32Array,
+		sampleLen: number,
+		channels: number
+	) {
+		if (!this.audioPort || sampleLen <= 0) return;
+		let srcPos = 0;
+		while (srcPos < sampleLen) {
+			if (!this.audioChunkWrite) {
+				const next = this.audioChunkPool.pop();
+				if (!next) {
+					// プール枯渇時は以降を破棄して後続ブロックへ進む。
+					break;
+				}
+				this.audioChunkWrite = next;
+				this.audioChunkWritePos = 0;
+			}
+			const dst = this.audioChunkWrite;
+			if (!dst) break;
+			const remain = this.audioChunkPacketSamples - this.audioChunkWritePos;
+			const take = Math.min(remain, sampleLen - srcPos);
+			dst.set(src.subarray(srcPos, srcPos + take), this.audioChunkWritePos);
+			this.audioChunkWritePos += take;
+			srcPos += take;
+			if (this.audioChunkWritePos >= this.audioChunkPacketSamples) {
+				this.audioPort.postMessage(
+					{ type: "push", channels, data: dst },
+					[dst.buffer]
+				);
+				this.audioChunkWrite = null;
+				this.audioChunkWritePos = 0;
+			}
+		}
+	}
 
 	private async ensureWasm() {
 		if (!this.wasmBindings) {
@@ -485,6 +554,7 @@ export class RadioBackend {
 
 	async setAudioPort(port: MessagePort) {
 		if (this.audioPort) {
+			this.audioPort.onmessage = null;
 			try {
 				this.audioPort.close();
 			} catch (_e) {
@@ -492,6 +562,13 @@ export class RadioBackend {
 			}
 		}
 		this.audioPort = port;
+		this.audioPort.onmessage = (event: MessageEvent) => {
+			const msg = event.data as AudioPortInboundMessage | null;
+			if (!msg || typeof msg !== "object") return;
+			if (msg.type === "recycle" && msg.data instanceof Float32Array) {
+				this.recycleAudioChunk(msg.data);
+			}
+		};
 		if (typeof this.audioPort.start === "function") {
 			this.audioPort.start();
 		}
@@ -565,6 +642,9 @@ export class RadioBackend {
 		const coarseRate = options.sampleRate / coarseFactor;
 		const demodFactor = Math.max(1, Math.round(coarseRate / demodRate));
 		const audioChannels = Math.max(1, Math.min(2, this.receiver.audio_output_channels()));
+		const packetFrames = Math.max(128, Math.round(options.outputSampleRate * (AUDIO_PACKET_MS / 1000)));
+		const packetSamples = packetFrames * audioChannels;
+		this.initAudioChunkPool(packetSamples, AUDIO_PACKET_POOL);
 		const iqSamplesPerBlock = HackRF.TRANSFER_BUFFER_SIZE / 2;
 		const blockBudgetMs = (iqSamplesPerBlock / Math.max(1, options.sampleRate)) * 1000;
 		const demodSamplesPerBlock = Math.ceil(iqSamplesPerBlock / coarseFactor / demodFactor);
@@ -759,14 +839,7 @@ export class RadioBackend {
 
 			if (audioLen >= 0) {
 				if (audioLen > 0) {
-					if (this.audioPort) {
-						const audioChunk = new Float32Array(audioLen);
-						audioChunk.set(audioReadView.subarray(0, audioLen));
-						this.audioPort.postMessage(
-							{ type: "push", channels: audioChannels, data: audioChunk },
-							[audioChunk.buffer]
-						);
-					}
+					this.flushAudioToPort(audioReadView, audioLen, audioChannels);
 				}
 				audioFramesOutTotal += Math.floor(audioLen / audioChannels);
 
@@ -801,6 +874,7 @@ export class RadioBackend {
 				// no-op
 			}
 		}
+		this.resetAudioChunkState();
 		if (this.receiver) {
 			this.receiver.free_io_buffers();
 			this.receiver.free();
