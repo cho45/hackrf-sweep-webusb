@@ -14,8 +14,32 @@ const IQ_BYTES = Number(process.env.BENCH_IQ_BYTES ?? 262_144);
 const FFT_SIZE = Number(process.env.BENCH_FFT_SIZE ?? 1024);
 const BENCH_TIME_MS = Number(process.env.BENCH_TIME_MS ?? 1200);
 const BENCH_WARMUP_MS = Number(process.env.BENCH_WARMUP_MS ?? 300);
-const FLAVOR = String(process.env.BENCH_FLAVOR ?? "simd").toLowerCase();
+const FLAVOR = String(process.env.BENCH_FLAVOR ?? "both").toLowerCase();
 const CASE_KEYS_RAW = String(process.env.BENCH_CASES ?? "").trim();
+const BENCH_VERBOSE_RAW = String(process.env.BENCH_VERBOSE ?? "0").toLowerCase();
+const BENCH_VERBOSE =
+	BENCH_VERBOSE_RAW === "1" || BENCH_VERBOSE_RAW === "true" || BENCH_VERBOSE_RAW === "on";
+
+const RAW_LOG = console.log.bind(console);
+const RUST_LOG_PATTERNS = [/^\[Receiver::new\]/, /^\[CoarseFilter\]/, /^\[DemodFilter\]/, /^\[process#\d+\]/];
+
+const isRustBenchLog = (msg) =>
+	typeof msg === "string" && RUST_LOG_PATTERNS.some((pattern) => pattern.test(msg));
+
+function installRustLogFilter() {
+	if (BENCH_VERBOSE) {
+		return () => {};
+	}
+	console.log = (...args) => {
+		if (args.length > 0 && isRustBenchLog(args[0])) {
+			return;
+		}
+		RAW_LOG(...args);
+	};
+	return () => {
+		console.log = RAW_LOG;
+	};
+}
 
 const CASES = [
 	{ key: "am", label: "AM", demodMode: "AM", ifMinHz: 0, ifMaxHz: 4_500, fmStereo: false },
@@ -157,35 +181,43 @@ async function canLoadSimd() {
 }
 
 async function main() {
-	console.log(`[bench] node=${process.version}`);
-	const simdBindings = await canLoadSimd();
-	console.log(`[bench] wasm simd support=${simdBindings !== null}`);
-	if (CASE_KEYS_RAW) {
-		console.log(`[bench] cases=${CASE_KEYS_RAW}`);
-	}
-	if (FLAVOR === "both") {
-		const baseMetrics = await runFlavor("base");
-		if (simdBindings) {
-			const simdMetrics = await runFlavor("simd");
-			console.log("\n[speedup simd/base]");
-			for (const [name, base] of baseMetrics.entries()) {
-				const simd = simdMetrics.get(name);
-				if (!simd || simd.msPerBlock <= 0) continue;
-				const speedup = base.msPerBlock / simd.msPerBlock;
-				console.log(`${name.padEnd(10)}  ${speedup.toFixed(3)}x`);
-			}
+	const restoreLog = installRustLogFilter();
+	try {
+		console.log(`[bench] node=${process.version}`);
+		const simdBindings = await canLoadSimd();
+		console.log(`[bench] wasm simd support=${simdBindings !== null}`);
+		if (BENCH_VERBOSE) {
+			console.log("[bench] verbose=true");
 		}
-		return;
-	}
-	if (FLAVOR === "simd") {
-		if (!simdBindings) {
-			console.log("[bench] skip simd: runtime does not support wasm simd128");
+		if (CASE_KEYS_RAW) {
+			console.log(`[bench] cases=${CASE_KEYS_RAW}`);
+		}
+		if (FLAVOR === "both") {
+			const baseMetrics = await runFlavor("base");
+			if (simdBindings) {
+				const simdMetrics = await runFlavor("simd");
+				console.log("\n[speedup simd/base]");
+				for (const [name, base] of baseMetrics.entries()) {
+					const simd = simdMetrics.get(name);
+					if (!simd || simd.msPerBlock <= 0) continue;
+					const speedup = base.msPerBlock / simd.msPerBlock;
+					console.log(`${name.padEnd(10)}  ${speedup.toFixed(3)}x`);
+				}
+			}
 			return;
 		}
-		await runFlavor("simd");
-		return;
+		if (FLAVOR === "simd") {
+			if (!simdBindings) {
+				console.log("[bench] skip simd: runtime does not support wasm simd128");
+				return;
+			}
+			await runFlavor("simd");
+			return;
+		}
+		await runFlavor("base");
+	} finally {
+		restoreLog();
 	}
-	await runFlavor("base");
 }
 
 main().catch((err) => {
