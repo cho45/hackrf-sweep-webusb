@@ -48,9 +48,6 @@ const FM_STEREO_AUDIO_PATH: AudioPathProfile = AudioPathProfile {
     audio_cutoff_hz: 15_000.0,
 };
 
-/// 既存テスト・ログで使うエイリアス
-const AM_DEMOD_RATE: f32 = AM_AUDIO_PATH.demod_rate_hz;
-const FM_DEMOD_RATE: f32 = FM_MONO_AUDIO_PATH.demod_rate_hz;
 const FM_DEEMPHASIS_TAU_US: f32 = 50.0;
 const COARSE_STAGE_RATE: f32 = 1_000_000.0;
 const FFT_DC_INTERP_HALF_WIDTH: usize = 2;
@@ -83,8 +80,21 @@ impl DemodMode {
 
     fn demod_rate(self) -> f32 {
         match self {
-            Self::Am => AM_DEMOD_RATE,
-            Self::Fm => FM_DEMOD_RATE,
+            Self::Am => AM_AUDIO_PATH.demod_rate_hz,
+            Self::Fm => FM_MONO_AUDIO_PATH.demod_rate_hz,
+        }
+    }
+}
+
+fn audio_profile_for(mode: DemodMode, fm_stereo_enabled: bool) -> AudioPathProfile {
+    match mode {
+        DemodMode::Am => AM_AUDIO_PATH,
+        DemodMode::Fm => {
+            if fm_stereo_enabled {
+                FM_STEREO_AUDIO_PATH
+            } else {
+                FM_MONO_AUDIO_PATH
+            }
         }
     }
 }
@@ -356,37 +366,18 @@ impl Receiver {
             if_max_hz
         ));
 
-        let mono_audio_profile = match mode {
-            DemodMode::Am => AM_AUDIO_PATH,
-            DemodMode::Fm => FM_MONO_AUDIO_PATH,
-        };
+        let initial_audio_profile = audio_profile_for(mode, true);
         let fm_stereo = FMStereoDecoder::new(plan.demod_sample_rate, Some(FM_DEEMPHASIS_TAU_US));
-        let fm_stereo_sample_rate = fm_stereo
-            .processing_sample_rate_hz()
-            .min(FM_STEREO_AUDIO_PATH.intermediate_rate_hz);
-
-        let mut resampler = Resampler::new_with_cutoff(
-            plan.demod_sample_rate.round() as u32,
+        let resampler = Resampler::new_with_cutoff(
+            initial_audio_profile.intermediate_rate_hz.round() as u32,
             output_sample_rate.round() as u32,
-            Some(mono_audio_profile.audio_cutoff_hz),
+            Some(initial_audio_profile.audio_cutoff_hz),
         );
-        let mut resampler_right = Resampler::new_with_cutoff(
-            plan.demod_sample_rate.round() as u32,
+        let resampler_right = Resampler::new_with_cutoff(
+            initial_audio_profile.intermediate_rate_hz.round() as u32,
             output_sample_rate.round() as u32,
-            Some(mono_audio_profile.audio_cutoff_hz),
+            Some(initial_audio_profile.audio_cutoff_hz),
         );
-        if mode == DemodMode::Fm {
-            resampler.reconfigure(
-                fm_stereo_sample_rate.round() as u32,
-                output_sample_rate.round() as u32,
-                Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
-            );
-            resampler_right.reconfigure(
-                fm_stereo_sample_rate.round() as u32,
-                output_sample_rate.round() as u32,
-                Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
-            );
-        }
 
         // FFT窓関数 (Hann窓)
         let mut window = vec![0.0f32; fft_size];
@@ -526,35 +517,17 @@ impl Receiver {
             self.fm_demod.set_deemphasis_enabled(!enabled);
             self.fm_demod.reset_audio_state();
             let output_rate = self.resampler.target_rate;
-            if enabled {
-                let stereo_input_rate = self
-                    .fm_stereo
-                    .processing_sample_rate_hz()
-                    .min(FM_STEREO_AUDIO_PATH.intermediate_rate_hz)
-                    .round() as u32;
-                self.resampler.reconfigure(
-                    stereo_input_rate,
-                    output_rate,
-                    Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
-                );
-                self.resampler_right.reconfigure(
-                    stereo_input_rate,
-                    output_rate,
-                    Some(FM_STEREO_AUDIO_PATH.audio_cutoff_hz),
-                );
-            } else {
-                let mono_input_rate = self.demod_sample_rate.round() as u32;
-                self.resampler.reconfigure(
-                    mono_input_rate,
-                    output_rate,
-                    Some(FM_MONO_AUDIO_PATH.audio_cutoff_hz),
-                );
-                self.resampler_right.reconfigure(
-                    mono_input_rate,
-                    output_rate,
-                    Some(FM_MONO_AUDIO_PATH.audio_cutoff_hz),
-                );
-            }
+            let audio_profile = audio_profile_for(self.mode, self.fm_stereo_enabled);
+            self.resampler.reconfigure(
+                audio_profile.intermediate_rate_hz.round() as u32,
+                output_rate,
+                Some(audio_profile.audio_cutoff_hz),
+            );
+            self.resampler_right.reconfigure(
+                audio_profile.intermediate_rate_hz.round() as u32,
+                output_rate,
+                Some(audio_profile.audio_cutoff_hz),
+            );
         }
     }
 
@@ -801,7 +774,6 @@ impl Receiver {
             }
             DemodMode::Fm => {
                 if self.fm_stereo_enabled {
-                    // FM stereo は fm_stereo 内で必要なら MPX を中間レートへ変換して処理する。
                     self.fm_stereo.process(
                         &self.demod_buffer,
                         &mut self.stereo_left_buffer,
@@ -837,31 +809,6 @@ impl Receiver {
                         self.audio_buffer.push(sample);
                     }
                 }
-            }
-        }
-
-        // デバッグログ（最初の5ブロックのみ）
-        {
-            static LOG_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let count = LOG_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if count < 5 {
-                // NCO後のDC成分（信号がDCにあるか検証）
-                let bb_dc = self.baseband_buffer.iter().sum::<Complex<f32>>()
-                    / self.baseband_buffer.len().max(1) as f32;
-                let dec_peak = self
-                    .demod_iq_buffer
-                    .iter()
-                    .map(|s| s.norm())
-                    .fold(0.0f32, f32::max);
-                let demod_peak = self
-                    .demod_buffer
-                    .iter()
-                    .map(|s| s.abs())
-                    .fold(0.0f32, f32::max);
-                log(&format!(
-                    "[process#{}] bb_dc={:.4}+{:.4}j (mag={:.4}) dec_peak={:.4} demod_peak={:.4} audio_len={}",
-                    count, bb_dc.re, bb_dc.im, bb_dc.norm(), dec_peak, demod_peak, self.audio_buffer.len()
-                ));
             }
         }
 
@@ -997,7 +944,7 @@ mod tests {
             assert_eq!(plan.coarse_factor, expected_coarse);
             assert_eq!(plan.demod_factor, 20);
             approx_eq(plan.coarse_stage_rate, 1_000_000.0);
-            approx_eq(plan.demod_sample_rate, AM_DEMOD_RATE);
+            approx_eq(plan.demod_sample_rate, AM_AUDIO_PATH.demod_rate_hz);
         }
     }
 
@@ -1013,34 +960,23 @@ mod tests {
             let plan = build_decimation_plan(sr, DemodMode::Fm);
             assert_eq!(plan.demod_factor, 5);
             approx_eq(plan.coarse_stage_rate, 1_000_000.0);
-            approx_eq(plan.demod_sample_rate, FM_DEMOD_RATE);
+            approx_eq(plan.demod_sample_rate, FM_MONO_AUDIO_PATH.demod_rate_hz);
         }
     }
 
     #[test]
-    fn fm_stereo_mpx_resampler_downsamples_to_125k() {
-        let mut rs = Resampler::new_with_cutoff(
-            FM_DEMOD_RATE.round() as u32,
+    fn fm_stereo_intermediate_rate_matches_demod_rate() {
+        assert_eq!(
             FM_STEREO_AUDIO_PATH.intermediate_rate_hz.round() as u32,
-            Some(crate::demod::FM_STEREO_MPX_RESAMPLE_CUTOFF_HZ),
-        );
-        let input = vec![0.0f32; 20_000];
-        let mut out = Vec::new();
-        rs.process(&input, &mut out);
-        let ratio = out.len() as f32 / input.len() as f32;
-        assert!(
-            (ratio - 0.625).abs() < 0.05,
-            "unexpected downsample ratio: {} (out={}, in={})",
-            ratio,
-            out.len(),
-            input.len()
+            FM_MONO_AUDIO_PATH.demod_rate_hz.round() as u32,
+            "FM stereo intermediate rate must equal FM demod rate when MPX resampler is disabled"
         );
     }
 
     #[test]
     fn sanitize_if_band_is_bounded_by_demod_rate() {
-        let (_, max) = sanitize_if_band(0.0, 200_000.0, AM_DEMOD_RATE);
-        assert!(max <= AM_DEMOD_RATE * 0.49);
+        let (_, max) = sanitize_if_band(0.0, 200_000.0, AM_AUDIO_PATH.demod_rate_hz);
+        assert!(max <= AM_AUDIO_PATH.demod_rate_hz * 0.49);
     }
 
     #[test]
