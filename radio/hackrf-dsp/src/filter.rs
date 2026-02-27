@@ -59,6 +59,14 @@ pub struct FirFilter {
     pos: usize,
 }
 
+/// 複素サンプル向け FIR フィルタ。
+/// 実係数を I/Q に同時適用する（I/Q を別々の FirFilter で回すのと等価）。
+pub struct ComplexFirFilter {
+    coeffs: Vec<f32>,
+    delay: Vec<Complex<f32>>,
+    pos: usize,
+}
+
 impl FirFilter {
     /// Hamming窓のLPFを作る。
     /// `cutoff_norm` は入力サンプルレート基準（Nyquist=0.5）。
@@ -83,7 +91,11 @@ impl FirFilter {
         let mut idx = self.pos;
         for &h in &self.coeffs {
             acc += h * self.delay[idx];
-            idx = if idx == 0 { self.delay.len() - 1 } else { idx - 1 };
+            idx = if idx == 0 {
+                self.delay.len() - 1
+            } else {
+                idx - 1
+            };
         }
 
         self.pos += 1;
@@ -91,6 +103,46 @@ impl FirFilter {
             self.pos = 0;
         }
         acc
+    }
+}
+
+impl ComplexFirFilter {
+    pub fn new_lowpass_hamming(num_taps: usize, cutoff_norm: f32) -> Self {
+        let coeffs = design_lowpass_coeffs(num_taps, cutoff_norm);
+        Self {
+            delay: vec![Complex::new(0.0, 0.0); num_taps],
+            coeffs,
+            pos: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.delay.fill(Complex::new(0.0, 0.0));
+        self.pos = 0;
+    }
+
+    pub fn process_sample(&mut self, x: Complex<f32>) -> Complex<f32> {
+        self.delay[self.pos] = x;
+
+        let mut acc_re = 0.0f32;
+        let mut acc_im = 0.0f32;
+        let mut idx = self.pos;
+        for &h in &self.coeffs {
+            let s = self.delay[idx];
+            acc_re += h * s.re;
+            acc_im += h * s.im;
+            idx = if idx == 0 {
+                self.delay.len() - 1
+            } else {
+                idx - 1
+            };
+        }
+
+        self.pos += 1;
+        if self.pos >= self.delay.len() {
+            self.pos = 0;
+        }
+        Complex::new(acc_re, acc_im)
     }
 }
 
@@ -359,7 +411,12 @@ mod tests {
         for chunk_size in [1usize, 3, 7, 64, 511, 131_072] {
             let mut chunked = DecimationFilter::new_boxcar(factor);
             let out_chunks = run_in_chunks(&mut chunked, &input, chunk_size);
-            assert_eq!(out_whole.len(), out_chunks.len(), "chunk_size={}", chunk_size);
+            assert_eq!(
+                out_whole.len(),
+                out_chunks.len(),
+                "chunk_size={}",
+                chunk_size
+            );
             let max_err = out_whole
                 .iter()
                 .zip(out_chunks.iter())
@@ -418,7 +475,10 @@ mod tests {
         let mut input_pass = vec![];
         for i in 0..10_000 {
             let t = i as f32 / sample_rate;
-            input_pass.push(Complex::new((2.0 * std::f32::consts::PI * pass_freq * t).cos(), 0.0));
+            input_pass.push(Complex::new(
+                (2.0 * std::f32::consts::PI * pass_freq * t).cos(),
+                0.0,
+            ));
         }
 
         // ストップバンド信号 100kHz (カットされるはず)
@@ -426,7 +486,10 @@ mod tests {
         let mut input_stop = vec![];
         for i in 0..10_000 {
             let t = i as f32 / sample_rate;
-            input_stop.push(Complex::new((2.0 * std::f32::consts::PI * stop_freq * t).cos(), 0.0));
+            input_stop.push(Complex::new(
+                (2.0 * std::f32::consts::PI * stop_freq * t).cos(),
+                0.0,
+            ));
         }
 
         let out_pass = flt_pass.process(&input_pass);
@@ -522,15 +585,9 @@ mod tests {
 
         // 立ち上がり過渡を捨ててパワー比較
         let skip = 50usize.min(out_pass.len().saturating_sub(1));
-        let pass_power = out_pass[skip..]
-            .iter()
-            .map(|c| c.norm_sqr())
-            .sum::<f32>()
+        let pass_power = out_pass[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>()
             / (out_pass.len() - skip) as f32;
-        let adj_power = out_adj[skip..]
-            .iter()
-            .map(|c| c.norm_sqr())
-            .sum::<f32>()
+        let adj_power = out_adj[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>()
             / (out_adj.len() - skip) as f32;
 
         // 少なくとも20dB以上抑圧されること（power比 1/100 未満）
@@ -546,19 +603,20 @@ mod tests {
     fn test_fir_bandpass_rejects_dc() {
         let sample_rate = 2_000_000.0;
         let factor = 40;
-        let mut flt = DecimationFilter::new_fir_band(
-            factor,
-            601,
-            500.0 / sample_rate,
-            5_000.0 / sample_rate,
-        );
+        let mut flt =
+            DecimationFilter::new_fir_band(factor, 601, 500.0 / sample_rate, 5_000.0 / sample_rate);
 
         let len = 200_000;
         let input: Vec<Complex<f32>> = (0..len).map(|_| Complex::new(1.0, 0.0)).collect();
         let out = flt.process(&input);
         let skip = 50usize.min(out.len().saturating_sub(1));
-        let dc_power = out[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>() / (out.len() - skip) as f32;
-        assert!(dc_power < 1e-3, "Band-pass should reject DC, got dc_power={}", dc_power);
+        let dc_power =
+            out[skip..].iter().map(|c| c.norm_sqr()).sum::<f32>() / (out.len() - skip) as f32;
+        assert!(
+            dc_power < 1e-3,
+            "Band-pass should reject DC, got dc_power={}",
+            dc_power
+        );
     }
 
     fn tone_amplitude(samples: &[f32], sample_rate: f32, freq_hz: f32) -> f32 {
@@ -627,5 +685,42 @@ mod tests {
             "19k rejection too small for 128tap/15kHz LPF: rej_db={}",
             rej_db
         );
+    }
+
+    #[test]
+    fn complex_fir_matches_two_real_firs() {
+        let taps = 63usize;
+        let cutoff = 15_000.0f32 / 200_000.0f32;
+        let mut fir_i = FirFilter::new_lowpass_hamming(taps, cutoff);
+        let mut fir_q = FirFilter::new_lowpass_hamming(taps, cutoff);
+        let mut cfir = ComplexFirFilter::new_lowpass_hamming(taps, cutoff);
+
+        let n = 20_000usize;
+        let mut state = 0x1357_9BDFu32;
+        for _ in 0..n {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let u0 = ((state >> 8) as f32) * (1.0 / 16_777_216.0);
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            let u1 = ((state >> 8) as f32) * (1.0 / 16_777_216.0);
+            let x_i = u0 * 2.0 - 1.0;
+            let x_q = u1 * 2.0 - 1.0;
+
+            let y_i = fir_i.process_sample(x_i);
+            let y_q = fir_q.process_sample(x_q);
+            let y_c = cfir.process_sample(Complex::new(x_i, x_q));
+
+            assert!(
+                (y_i - y_c.re).abs() < 1e-6,
+                "I mismatch: y_i={} y_c.re={}",
+                y_i,
+                y_c.re
+            );
+            assert!(
+                (y_q - y_c.im).abs() < 1e-6,
+                "Q mismatch: y_q={} y_c.im={}",
+                y_q,
+                y_c.im
+            );
+        }
     }
 }

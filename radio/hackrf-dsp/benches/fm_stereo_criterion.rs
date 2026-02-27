@@ -94,7 +94,9 @@ fn bench_fm_stereo_process(c: &mut Criterion) {
             (FMStereoInputKind::MonoWithPilot, "mono_with_pilot"),
         ] {
             let mut fixtures: Vec<FMStereoProcessFixture> = (0..16)
-                .map(|block_idx| FMStereoProcessFixture::new(sample_rate_hz, BLOCK_SAMPLES, kind, block_idx))
+                .map(|block_idx| {
+                    FMStereoProcessFixture::new(sample_rate_hz, BLOCK_SAMPLES, kind, block_idx)
+                })
                 .collect();
             let mut cursor = 0usize;
             group.throughput(Throughput::Elements(BLOCK_SAMPLES as u64));
