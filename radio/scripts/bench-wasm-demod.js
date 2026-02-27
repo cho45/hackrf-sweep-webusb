@@ -86,15 +86,32 @@ function freeReceiver(receiver) {
 	receiver.free();
 }
 
+function computeRealtimeTarget() {
+	const iqSamplesPerBlock = IQ_BYTES / 2;
+	const requiredBlocksPerSec = SAMPLE_RATE / iqSamplesPerBlock;
+	return {
+		requiredBlocksPerSec,
+		blockBudgetMs: 1000 / requiredBlocksPerSec,
+	};
+}
+
 function printBench(flavor, bench) {
-	console.log(`\\n[bench:${flavor}] sampleRate=${SAMPLE_RATE} audioRate=${AUDIO_SR} iqBytes=${IQ_BYTES}`);
+	const rt = computeRealtimeTarget();
+	console.log(`\n[bench:${flavor}] sampleRate=${SAMPLE_RATE} audioRate=${AUDIO_SR} iqBytes=${IQ_BYTES}`);
+	console.log(
+		`[bench:${flavor}] realtime target=${rt.requiredBlocksPerSec.toFixed(1)} blocks/s  budget=${rt.blockBudgetMs.toFixed(3)} ms/block`,
+	);
 	for (const task of bench.tasks) {
 		const r = task.result;
 		if (!r) continue;
 		const hz = r.hz;
 		const ms = 1000 / hz;
 		const rme = Number.isFinite(r.rme) ? r.rme : 0;
-		console.log(`${task.name.padEnd(10)}  ${ms.toFixed(3)} ms/block  ${hz.toFixed(1)} blocks/s  ±${rme.toFixed(2)}%`);
+		const rtMargin = hz / rt.requiredBlocksPerSec;
+		const headroomPct = (rtMargin - 1) * 100;
+		console.log(
+			`${task.name.padEnd(10)}  ${ms.toFixed(3)} ms/block  ${hz.toFixed(1)} blocks/s  rt=${rtMargin.toFixed(2)}x (${headroomPct.toFixed(0)}%)  ±${rme.toFixed(2)}%`,
+		);
 	}
 }
 
