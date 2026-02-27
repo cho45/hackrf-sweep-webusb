@@ -30,9 +30,10 @@ name = "fm_stereo_criterion"
 harness = false
 
 [profile.release]
-opt-level = "z"
-lto = true
+opt-level = 3
+lto = "thin"
 codegen-units = 1
+panic = "abort"
 
 [profile.bench]
 opt-level = 3
