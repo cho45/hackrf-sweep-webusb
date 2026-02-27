@@ -209,8 +209,8 @@ async function runCase(cfg, baseBindings, simdBindings) {
 		const iqLen = iqLens[i % iqLens.length];
 		fillIq(iqBase, iqSimd, iqLen, i + 1);
 
-		const audioLenBase = base.process_iq_len(iqLen);
-		const audioLenSimd = simd.process_iq_len(iqLen);
+		const audioLenBase = base.process_iq_len(iqLen, true);
+		const audioLenSimd = simd.process_iq_len(iqLen, true);
 		if (audioLenBase !== audioLenSimd) {
 			throw new Error(
 				`${cfg.name}: audio length mismatch block=${i} base=${audioLenBase} simd=${audioLenSimd}`,

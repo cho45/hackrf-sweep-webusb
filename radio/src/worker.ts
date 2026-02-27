@@ -62,7 +62,7 @@ type ReceiverCtor = new (
 	iq_input_capacity: () => number;
 	audio_output_capacity: () => number;
 	fft_output_capacity: () => number;
-	process_iq_len: (iqLen: number) => number;
+	process_iq_len: (iqLen: number, wantFft: boolean) => number;
 	audio_output_channels: () => number;
 	get_stats: () => unknown;
 	set_fft_view: (startBin: number, visibleBins: number) => void;
@@ -787,10 +787,16 @@ export class RadioBackend {
 			// WASM I/O バッファへ転送後、長さだけ渡して処理する。
 			ensureViews();
 			iqWriteView.set(data.subarray(0, data.byteLength), 0);
+			const visibleBins = Math.max(
+				1,
+				Math.min(this.fftVisibleBins || fftOutCapacity, fftOutCapacity)
+			);
+			const perfDue = now - perfWindowStart >= 1000 && blockCount > 0;
+			const shouldPushUi = perfDue || now - lastUiPushAt >= UI_FFT_PUSH_INTERVAL_MS;
 			const processStart = performance.now();
 			let audioLen = 0;
 			try {
-				audioLen = this.receiver.process_iq_len(data.byteLength);
+				audioLen = this.receiver.process_iq_len(data.byteLength, shouldPushUi);
 			} catch (_e) {
 				droppedIqBlocksCount += 1;
 				return;
@@ -814,12 +820,6 @@ export class RadioBackend {
 				}
 				audioFramesOutTotal += Math.floor(audioLen / audioChannels);
 
-				const visibleBins = Math.max(
-					1,
-					Math.min(this.fftVisibleBins || fftOutCapacity, fftOutCapacity)
-				);
-				const perfDue = now - perfWindowStart >= 1000 && blockCount > 0;
-				const shouldPushUi = perfDue || now - lastUiPushAt >= UI_FFT_PUSH_INTERVAL_MS;
 				if (shouldPushUi) {
 					if (visibleBins !== fftPacketSamples) {
 						fftPacketSamples = visibleBins;

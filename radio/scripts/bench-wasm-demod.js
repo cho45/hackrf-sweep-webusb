@@ -151,7 +151,7 @@ async function runFlavor(flavor) {
 		const receiver = setupReceiver(bindings, c);
 		receivers.push(receiver);
 		bench.add(c.label, () => {
-			receiver.process_iq_len(IQ_BYTES);
+			receiver.process_iq_len(IQ_BYTES, true);
 		});
 	}
 	await bench.run();

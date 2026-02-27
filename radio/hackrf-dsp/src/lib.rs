@@ -586,7 +586,8 @@ impl Receiver {
     }
 
     /// `alloc_io_buffers` で確保したI/Qバッファ先頭 `iq_len` バイトを入力として処理する。
-    pub fn process_iq_len(&mut self, iq_len: usize) -> Result<usize, JsValue> {
+    /// `want_fft` が false の場合は FFT 更新をスキップする。
+    pub fn process_iq_len(&mut self, iq_len: usize, want_fft: bool) -> Result<usize, JsValue> {
         if self.io_iq_buffer.is_empty() || self.io_audio_buffer.is_empty() || self.io_fft_buffer.is_empty() {
             return Err(JsValue::from_str("io buffers are not allocated"));
         }
@@ -601,22 +602,24 @@ impl Receiver {
         // io_iq_buffer を変更しないため、raw pointer からの一時スライス化で確保を避ける。
         let iq_ptr = self.io_iq_buffer.as_ptr();
         let iq_slice = unsafe { std::slice::from_raw_parts(iq_ptr, iq_len) };
-        self.process_internal(iq_slice);
+        self.process_internal(iq_slice, want_fft);
 
         if self.audio_buffer.len() > self.io_audio_buffer.len() {
             return Err(JsValue::from_str("audio output exceeds io_audio_buffer capacity"));
-        }
-        if self.fft_visible_buffer.len() > self.io_fft_buffer.len() {
-            return Err(JsValue::from_str("fft output exceeds io_fft_buffer capacity"));
         }
 
         let audio_len = self.audio_buffer.len();
         if audio_len > 0 {
             self.io_audio_buffer[..audio_len].copy_from_slice(&self.audio_buffer[..audio_len]);
         }
-        let fft_len = self.fft_visible_buffer.len();
-        if fft_len > 0 {
-            self.io_fft_buffer[..fft_len].copy_from_slice(&self.fft_visible_buffer[..fft_len]);
+        if want_fft {
+            if self.fft_visible_buffer.len() > self.io_fft_buffer.len() {
+                return Err(JsValue::from_str("fft output exceeds io_fft_buffer capacity"));
+            }
+            let fft_len = self.fft_visible_buffer.len();
+            if fft_len > 0 {
+                self.io_fft_buffer[..fft_len].copy_from_slice(&self.fft_visible_buffer[..fft_len]);
+            }
         }
         Ok(audio_len)
     }
@@ -624,7 +627,7 @@ impl Receiver {
     /// 1ブロックのIQデータ(i8型)を受け取り、指定バッファへ結果を書き込む。
     /// 返り値は `audio_out` に有効に書き込まれたサンプル数。
     pub fn process_into(&mut self, iq_data: &[i8], audio_out: &mut [f32], fft_out: &mut [f32]) -> usize {
-        self.process_internal(iq_data);
+        self.process_internal(iq_data, true);
 
         let audio_len = self.audio_buffer.len().min(audio_out.len());
         if audio_len > 0 {
@@ -690,7 +693,7 @@ impl Receiver {
         }
     }
 
-    fn process_internal(&mut self, iq_data: &[i8]) {
+    fn process_internal(&mut self, iq_data: &[i8], want_fft: bool) {
         let fft_n = self.fft.get_n();
 
         // ベースバンド処理 & NCO
@@ -791,17 +794,19 @@ impl Receiver {
             }
         }
 
-        // FFT (iq_data の先頭 fft_size * 2 要素を使用)
-        self.fft_buffer.fill(-120.0);
-        if iq_data.len() >= fft_n * 2 {
-            self.fft.fft(&iq_data[0..fft_n * 2], &mut self.fft_buffer);
-            if self.dc_cancel_enabled {
-                interpolate_fft_dc_bins(&mut self.fft_buffer, FFT_DC_INTERP_HALF_WIDTH);
+        if want_fft {
+            // FFT (iq_data の先頭 fft_size * 2 要素を使用)
+            self.fft_buffer.fill(-120.0);
+            if iq_data.len() >= fft_n * 2 {
+                self.fft.fft(&iq_data[0..fft_n * 2], &mut self.fft_buffer);
+                if self.dc_cancel_enabled {
+                    interpolate_fft_dc_bins(&mut self.fft_buffer, FFT_DC_INTERP_HALF_WIDTH);
+                }
             }
+            let visible_end = self.fft_visible_start + self.fft_visible_len;
+            self.fft_visible_buffer
+                .copy_from_slice(&self.fft_buffer[self.fft_visible_start..visible_end]);
         }
-        let visible_end = self.fft_visible_start + self.fft_visible_len;
-        self.fft_visible_buffer
-            .copy_from_slice(&self.fft_buffer[self.fft_visible_start..visible_end]);
     }
 }
 
@@ -1142,14 +1147,14 @@ mod tests {
     #[test]
     fn process_iq_len_requires_alloc_and_valid_len() {
         let mut receiver = make_receiver();
-        assert!(receiver.process_iq_len(1024).is_err());
+        assert!(receiver.process_iq_len(1024, true).is_err());
 
         receiver
             .alloc_io_buffers(4096, 4096, 1024)
             .expect("alloc_io_buffers should succeed");
-        assert!(receiver.process_iq_len(0).is_err());
-        assert!(receiver.process_iq_len(3).is_err());
-        assert!(receiver.process_iq_len(4098).is_err());
+        assert!(receiver.process_iq_len(0, true).is_err());
+        assert!(receiver.process_iq_len(3, true).is_err());
+        assert!(receiver.process_iq_len(4098, true).is_err());
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1165,7 +1170,7 @@ mod tests {
         for (i, v) in iq_slice.iter_mut().enumerate() {
             *v = if (i & 1) == 0 { 64 } else { -64 };
         }
-        let out = receiver.process_iq_len(4096);
+        let out = receiver.process_iq_len(4096, true);
         assert!(out.is_ok());
         assert!(out.expect("audio length should be returned") <= receiver.audio_output_capacity());
     }
