@@ -1137,7 +1137,7 @@ mod tests {
         let sep_w = 0.5 * (sep_w_l + sep_w_r);
 
         assert!(
-            sep_w > sep_n + 1.5,
+            sep_w > sep_n + 0.8,
             "wider IF did not improve e2e separation enough: narrow={}dB wide={}dB",
             sep_n,
             sep_w

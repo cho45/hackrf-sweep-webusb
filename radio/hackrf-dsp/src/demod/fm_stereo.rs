@@ -19,7 +19,7 @@ pub struct FMStereoStats {
 const SUM_AUDIO_FIR_TAPS: usize = 128;
 const DIFF_AUDIO_FIR_TAPS: usize = 128;
 const SUM_AUDIO_LPF_CUTOFF_HZ: f32 = 15_000.0;
-const DIFF_AUDIO_LPF_CUTOFF_HZ: f32 = 13_500.0;
+const DIFF_AUDIO_LPF_CUTOFF_HZ: f32 = 15_000.0;
 const PILOT_DETECT_LPF_HZ: f32 = 40.0;
 const PLL_BW_HZ: f32 = 12.0;
 const PLL_DAMPING: f32 = 0.707;
@@ -141,6 +141,7 @@ struct AudioState {
     deemphasis_l: f32,
     deemphasis_r: f32,
     high_blend_state: f32,
+    high_blend_state2: f32,
 }
 
 #[derive(Default)]
@@ -195,8 +196,8 @@ impl FMStereoConfig {
             blend_attack_alpha: alpha_from_tau(sample_rate_hz, 0.03),
             blend_release_alpha: alpha_from_tau(sample_rate_hz, 0.20),
             lr_phase_track_alpha: alpha_from_cutoff(sample_rate_hz, LR_PHASE_TRACK_LPF_HZ),
-            high_blend_alpha_weak: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_WEAK_HZ),
-            high_blend_alpha_strong: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_STRONG_HZ),
+            high_blend_alpha_weak: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_WEAK_HZ / 0.6436),
+            high_blend_alpha_strong: alpha_from_cutoff(sample_rate_hz, HIGH_BLEND_CUTOFF_STRONG_HZ / 0.6436),
             deemphasis_alpha,
             pilot_lock_low: 0.010,
             pilot_lock_high: 0.030,
@@ -300,6 +301,7 @@ impl AudioState {
         self.deemphasis_l = 0.0;
         self.deemphasis_r = 0.0;
         self.high_blend_state = 0.0;
+        self.high_blend_state2 = 0.0;
     }
 }
 
@@ -514,7 +516,7 @@ impl FMStereoDecoder {
         (sum, lr_aligned)
     }
 
-    /// High-blend + L/R合成 + deemphasis。
+    /// High-blend (2次カスケード IIR, -12dB/oct) + L/R合成 + deemphasis。
     ///
     /// High-blend: 信号品質に応じて L-R の高域を抑圧する。
     /// - stereo_blend ≈ 1（強い信号）: LPF カットオフ ≈ 15 kHz → ほぼ透過
@@ -524,9 +526,12 @@ impl FMStereoDecoder {
         let hb_alpha = self.cfg.high_blend_alpha_weak
             + (self.cfg.high_blend_alpha_strong - self.cfg.high_blend_alpha_weak)
                 * self.blend.stereo_blend;
+        // 2次カスケード: 同じ alpha を 2 段順に通す (-12 dB/oct)
         self.audio.high_blend_state +=
             hb_alpha * (lr_aligned - self.audio.high_blend_state);
-        let lr = self.audio.high_blend_state * self.blend.stereo_blend;
+        self.audio.high_blend_state2 +=
+            hb_alpha * (self.audio.high_blend_state - self.audio.high_blend_state2);
+        let lr = self.audio.high_blend_state2 * self.blend.stereo_blend;
         let mut l = sum + lr;
         let mut r = sum - lr;
 
